@@ -228,23 +228,23 @@ void updateHeaderIndicators(bool force = false) {
       continue;
     }
 
-    int x = i == 0 ? 262 : 290;
-    lcd.fillRect(x, 3, 26, 22, TFT_DARKGREY);
+    int x = i == 0 ? 186 : 212;
+    lcd.fillRect(x, 3, 24, 22, TFT_DARKGREY);
     lcd.setTextDatum(middle_center);
     lcd.setTextSize(1);
     lcd.setTextColor(connected ? TFT_GREEN : TFT_RED, TFT_DARKGREY);
-    lcd.drawString(i == 0 ? "A" : "B", x + 13, 14);
+    lcd.drawString(i == 0 ? "A" : "B", x + 12, 14);
     paintedHeaderConnected[i] = connected;
   }
   paintedHeaderValid = true;
 }
 
 void drawHeader(const char* title) {
-  lcd.fillRect(0, 0, 320, 28, TFT_DARKGREY);
+  lcd.fillRect(0, 0, 240, 28, TFT_DARKGREY);
   lcd.setTextDatum(middle_center);
   lcd.setTextColor(TFT_WHITE, TFT_DARKGREY);
   lcd.setTextSize(2);
-  lcd.drawString(title, 160, 14);
+  lcd.drawString(title, 120, 14);
   updateHeaderIndicators(true);
 }
 
@@ -261,27 +261,27 @@ void formatWeight(char* buffer, size_t len, float value, bool connected) {
 // Y position of the top of each compact dashboard cell row. Rows A and B are
 // real nodes (nodes[0]/nodes[1]); rows C and D are decorative placeholders
 // that advertise the 4-cell capability but have no node behind them.
-constexpr int CELL_ROW_Y[4] = {30, 62, 94, 126};
-constexpr int CELL_ROW_H = 30;
-constexpr int TOTAL_ROW_Y = 158;
-constexpr int TOTAL_ROW_H = 32;
+constexpr int CELL_ROW_Y[4] = {34, 80, 126, 172};
+constexpr int CELL_ROW_H = 44;
+constexpr int TOTAL_ROW_Y = 218;
+constexpr int TOTAL_ROW_H = 44;
 
 // Draw a decorative (C/D) cell row once: greyed out, always OFFLINE / "--".
 // These rows are not tappable and never carry a node's data.
 void drawDecorativeCell(const char* label, int y) {
-  lcd.drawRoundRect(7, y, 306, CELL_ROW_H, 6, TFT_DARKGREY);
+  lcd.drawRoundRect(6, y, 228, CELL_ROW_H, 6, TFT_DARKGREY);
   lcd.setTextDatum(top_left);
   lcd.setTextSize(1);
   lcd.setTextColor(TFT_DARKGREY, TFT_BLACK);
-  lcd.drawString(label, 14, y + 4);
-  lcd.drawString("OFFLINE", 14, y + 17);
+  lcd.drawString(label, 14, y + 6);
+  lcd.drawString("OFFLINE", 14, y + 24);
 
   lcd.setTextDatum(middle_right);
   lcd.setTextSize(2);
   lcd.setTextColor(TFT_DARKGREY, TFT_BLACK);
-  lcd.drawString("--", 282, y + CELL_ROW_H / 2);
+  lcd.drawString("--", 206, y + CELL_ROW_H / 2);
   lcd.setTextSize(1);
-  lcd.drawString("kg", 304, y + CELL_ROW_H / 2 + 1);
+  lcd.drawString("kg", 228, y + CELL_ROW_H / 2 + 1);
 }
 
 void drawMainStatic() {
@@ -289,28 +289,28 @@ void drawMainStatic() {
   drawHeader("WIRELESS SCALE");
 
   // Real cells A and B (updated live by updateMainNode).
-  lcd.drawRoundRect(7, CELL_ROW_Y[0], 306, CELL_ROW_H, 6, TFT_DARKGREY);
-  lcd.drawRoundRect(7, CELL_ROW_Y[1], 306, CELL_ROW_H, 6, TFT_DARKGREY);
+  lcd.drawRoundRect(6, CELL_ROW_Y[0], 228, CELL_ROW_H, 6, TFT_DARKGREY);
+  lcd.drawRoundRect(6, CELL_ROW_Y[1], 228, CELL_ROW_H, 6, TFT_DARKGREY);
   lcd.setTextDatum(top_left);
   lcd.setTextSize(1);
   lcd.setTextColor(TFT_WHITE, TFT_BLACK);
-  lcd.drawString("LOAD CELL A", 14, CELL_ROW_Y[0] + 4);
-  lcd.drawString("LOAD CELL B", 14, CELL_ROW_Y[1] + 4);
+  lcd.drawString("LOAD CELL A", 14, CELL_ROW_Y[0] + 6);
+  lcd.drawString("LOAD CELL B", 14, CELL_ROW_Y[1] + 6);
 
   // Decorative cells C and D (drawn once, never updated).
   drawDecorativeCell("LOAD CELL C", CELL_ROW_Y[2]);
   drawDecorativeCell("LOAD CELL D", CELL_ROW_Y[3]);
 
   // Total row (A + B only).
-  lcd.drawRoundRect(7, TOTAL_ROW_Y, 306, TOTAL_ROW_H, 6, TFT_CYAN);
+  lcd.drawRoundRect(6, TOTAL_ROW_Y, 228, TOTAL_ROW_H, 6, TFT_CYAN);
   lcd.setTextDatum(top_left);
   lcd.setTextSize(1);
   lcd.setTextColor(TFT_CYAN, TFT_BLACK);
-  lcd.drawString("TOTAL", 14, TOTAL_ROW_Y + 4);
+  lcd.drawString("TOTAL", 14, TOTAL_ROW_Y + 6);
 
   // Global action buttons.
-  drawButton(8, 196, 150, 38, "TARE ALL", TFT_BLUE);
-  drawButton(162, 196, 150, 38, "CALIBRATE", TFT_ORANGE);
+  drawButton(6, 270, 111, 40, "TARE ALL", TFT_BLUE);
+  drawButton(123, 270, 111, 40, "CALIBRATE", TFT_ORANGE);
   resetPaintCache();
 }
 
@@ -327,23 +327,23 @@ void updateMainNode(uint8_t i) {
   if (!changed) return;
 
   // Clear the status line (under the label) and the weight area.
-  lcd.fillRect(14, y + 16, 110, 12, TFT_BLACK);
-  lcd.fillRect(150, y + 2, 155, CELL_ROW_H - 4, TFT_BLACK);
+  lcd.fillRect(14, y + 23, 110, 14, TFT_BLACK);
+  lcd.fillRect(110, y + 2, 122, CELL_ROW_H - 4, TFT_BLACK);
 
   lcd.setTextDatum(top_left);
   lcd.setTextSize(1);
   lcd.setTextColor(statusColor(i), TFT_BLACK);
-  lcd.drawString(statusText(i), 14, y + 17);
+  lcd.drawString(statusText(i), 14, y + 24);
 
   char text[24];
   formatWeight(text, sizeof(text), nodes[i].weightKg, connected);
   lcd.setTextDatum(middle_right);
   lcd.setTextColor(TFT_WHITE, TFT_BLACK);
   lcd.setTextSize(2);
-  lcd.drawString(text, 282, y + CELL_ROW_H / 2);
+  lcd.drawString(text, 206, y + CELL_ROW_H / 2);
   lcd.setTextSize(1);
   lcd.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-  lcd.drawString("kg", 304, y + CELL_ROW_H / 2 + 1);
+  lcd.drawString("kg", 228, y + CELL_ROW_H / 2 + 1);
 
   paintedWeight[i] = nodes[i].weightKg;
   paintedStatus[i] = nodes[i].status;
@@ -355,17 +355,17 @@ void updateMainTotal() {
   float total = totalWeightKg();
   if (!isnan(paintedTotal) && fabsf(total - paintedTotal) < 0.001f) return;
 
-  lcd.fillRect(120, TOTAL_ROW_Y + 2, 185, TOTAL_ROW_H - 4, TFT_BLACK);
+  lcd.fillRect(70, TOTAL_ROW_Y + 2, 162, TOTAL_ROW_H - 4, TFT_BLACK);
   char text[24];
   formatWeight(text, sizeof(text), total, true);
 
   lcd.setTextDatum(middle_right);
   lcd.setTextSize(3);
   lcd.setTextColor(TFT_WHITE, TFT_BLACK);
-  lcd.drawString(text, 282, TOTAL_ROW_Y + TOTAL_ROW_H / 2);
+  lcd.drawString(text, 206, TOTAL_ROW_Y + TOTAL_ROW_H / 2);
   lcd.setTextSize(1);
   lcd.setTextColor(TFT_CYAN, TFT_BLACK);
-  lcd.drawString("kg", 304, TOTAL_ROW_Y + TOTAL_ROW_H / 2 + 1);
+  lcd.drawString("kg", 228, TOTAL_ROW_Y + TOTAL_ROW_H / 2 + 1);
   paintedTotal = total;
 }
 
@@ -380,35 +380,35 @@ void drawCalibrateStatic() {
   lcd.setTextDatum(top_left);
   lcd.setTextSize(1);
   lcd.setTextColor(TFT_WHITE, TFT_BLACK);
-  lcd.drawString("SELECT CELL", 14, 34);
-  drawButton(14, 48, 140, 40, "CELL A",
+  lcd.drawString("SELECT CELL", 14, 36);
+  drawButton(6, 50, 111, 42, "CELL A",
              selectedNode == 0 ? TFT_GREEN : TFT_DARKGREY);
-  drawButton(166, 48, 140, 40, "CELL B",
+  drawButton(123, 50, 111, 42, "CELL B",
              selectedNode == 1 ? TFT_GREEN : TFT_DARKGREY);
 
   // Known weight with +/- adjust.
   lcd.setTextDatum(top_left);
   lcd.setTextSize(1);
   lcd.setTextColor(TFT_WHITE, TFT_BLACK);
-  lcd.drawString("KNOWN WEIGHT", 14, 96);
+  lcd.drawString("KNOWN WEIGHT", 14, 104);
 
   char text[20];
   snprintf(text, sizeof(text), "%.1f kg", calibrationWeightKg);
   lcd.setTextDatum(middle_center);
   lcd.setTextColor(TFT_YELLOW, TFT_BLACK);
   lcd.setTextSize(3);
-  lcd.drawString(text, 160, 128);
+  lcd.drawString(text, 120, 153);
 
-  drawButton(14, 110, 60, 40, "-", TFT_BLUE);
-  drawButton(246, 110, 60, 40, "+", TFT_BLUE);
+  drawButton(6, 132, 60, 42, "-", TFT_BLUE);
+  drawButton(174, 132, 60, 42, "+", TFT_BLUE);
 
   // Per-cell actions.
   bool connected = nodeConnected(selectedNode);
-  drawButton(14, 160, 140, 40, "TARE", TFT_BLUE, connected);
-  drawButton(166, 160, 140, 40, "CALIBRATE", TFT_ORANGE, connected);
+  drawButton(6, 196, 111, 42, "TARE", TFT_BLUE, connected);
+  drawButton(123, 196, 111, 42, "CALIBRATE", TFT_ORANGE, connected);
 
   // Navigation.
-  drawButton(90, 206, 140, 30, "HOME", TFT_DARKGREY);
+  drawButton(65, 254, 110, 40, "HOME", TFT_DARKGREY);
   resetPaintCache();
 }
 
@@ -419,11 +419,11 @@ void drawSimpleMessage(const char* title, const char* line1,
   lcd.setTextDatum(top_center);
   lcd.setTextColor(TFT_WHITE, TFT_BLACK);
   lcd.setTextSize(2);
-  lcd.drawString(line1, 160, 65);
+  lcd.drawString(line1, 120, 70);
   if (line2) {
     lcd.setTextSize(1);
     lcd.setTextColor(TFT_YELLOW, TFT_BLACK);
-    lcd.drawString(line2, 160, 110);
+    lcd.drawString(line2, 120, 120);
   }
 }
 
@@ -436,18 +436,18 @@ void drawCalWeight() {
   lcd.setTextDatum(middle_center);
   lcd.setTextColor(TFT_YELLOW, TFT_BLACK);
   lcd.setTextSize(4);
-  lcd.drawString(text, 160, 105);
+  lcd.drawString(text, 120, 165);
 
-  drawButton(20, 155, 70, 50, "-", TFT_BLUE);
-  drawButton(100, 155, 70, 50, "+", TFT_BLUE);
-  drawButton(180, 155, 120, 50, "NEXT", TFT_GREEN);
+  drawButton(6, 230, 68, 54, "-", TFT_BLUE);
+  drawButton(86, 230, 68, 54, "+", TFT_BLUE);
+  drawButton(166, 230, 68, 54, "NEXT", TFT_GREEN);
 }
 
 void drawCalRemove() {
   drawSimpleMessage("STEP 1 OF 2",
                     waitingForTare ? "Taring..." : "Remove all weight",
                     waitingForTare ? "Please wait" : "Then press TARE");
-  if (!waitingForTare) drawButton(70, 165, 180, 50, "TARE", TFT_BLUE);
+  if (!waitingForTare) drawButton(30, 210, 180, 54, "TARE", TFT_BLUE);
 }
 
 void drawCalPlace() {
@@ -457,19 +457,19 @@ void drawCalPlace() {
                     waitingForCalibration ? "Calibrating..." : line,
                     waitingForCalibration ? "Keep weight still" : "Then press START");
   if (!waitingForCalibration)
-    drawButton(70, 165, 180, 50, "START", TFT_GREEN);
+    drawButton(30, 210, 180, 54, "START", TFT_GREEN);
 }
 
 void drawCalDone() {
   drawSimpleMessage("CALIBRATION", "COMPLETE", "Calibration saved");
-  drawButton(90, 170, 140, 46, "DONE", TFT_BLUE);
+  drawButton(50, 210, 140, 50, "DONE", TFT_BLUE);
 }
 
 void drawExitConfirm() {
   drawSimpleMessage("EXIT CALIBRATION", "Return to main menu?",
                     "The current load-cell operation may finish.");
-  drawButton(15, 165, 140, 50, "NO", TFT_DARKGREY);
-  drawButton(165, 165, 140, 50, "YES", TFT_RED);
+  drawButton(18, 210, 96, 54, "NO", TFT_DARKGREY);
+  drawButton(126, 210, 96, 54, "YES", TFT_RED);
 }
 
 void drawSettings() {
@@ -481,29 +481,29 @@ void drawSettings() {
   lcd.setTextSize(1);
 
   char line[48];
-  snprintf(line, sizeof(line), "Lock only above: %.1f kg", settingLockThresholdKg);
-  lcd.drawString(line, 15, 52);
-  drawButton(220, 38, 40, 30, "-", TFT_BLUE);
-  drawButton(270, 38, 40, 30, "+", TFT_BLUE);
+  snprintf(line, sizeof(line), "Lock above: %.1f kg", settingLockThresholdKg);
+  lcd.drawString(line, 14, 58);
+  drawButton(136, 42, 46, 32, "-", TFT_BLUE);
+  drawButton(188, 42, 46, 32, "+", TFT_BLUE);
 
   snprintf(line, sizeof(line), "Auto-lock: %s", settingAutoLock ? "ON" : "OFF");
-  lcd.drawString(line, 15, 94);
-  drawButton(220, 80, 90, 30, "TOGGLE", TFT_DARKGREEN);
+  lcd.drawString(line, 14, 110);
+  drawButton(150, 94, 84, 32, "TOGGLE", TFT_DARKGREEN);
 
   snprintf(line, sizeof(line), "Brightness: %u%%", settingBrightnessPercent);
-  lcd.drawString(line, 15, 136);
-  drawButton(220, 122, 40, 30, "-", TFT_BLUE);
-  drawButton(270, 122, 40, 30, "+", TFT_BLUE);
+  lcd.drawString(line, 14, 162);
+  drawButton(136, 146, 46, 32, "-", TFT_BLUE);
+  drawButton(188, 146, 46, 32, "+", TFT_BLUE);
 
   snprintf(line, sizeof(line), "Decimals: %u", settingDecimals);
-  lcd.drawString(line, 15, 178);
-  drawButton(220, 164, 90, 30, "TOGGLE", TFT_BLUE);
+  lcd.drawString(line, 14, 214);
+  drawButton(150, 198, 84, 32, "TOGGLE", TFT_BLUE);
 
   lcd.setTextColor(TFT_CYAN, TFT_BLACK);
-  lcd.drawString("Lock window: 1.0 kg for 4 seconds (fixed)", 15, 207);
+  lcd.drawString("Lock window: 1.0 kg for 4 seconds (fixed)", 14, 246);
 
-  drawButton(15, 214, 135, 24, "HOME", TFT_DARKGREY);
-  drawButton(170, 214, 135, 24, "SAVE", TFT_GREEN);
+  drawButton(6, 270, 111, 40, "HOME", TFT_DARKGREY);
+  drawButton(123, 270, 111, 40, "SAVE", TFT_GREEN);
 }
 
 void renderScreen() {
@@ -543,9 +543,11 @@ bool readTouch(uint16_t& x, uint16_t& y) {
 
   uint16_t rawX = ((data[3] & 0x0F) << 8) | data[4];
   uint16_t rawY = ((data[5] & 0x0F) << 8) | data[6];
-  x = rawY;
-  y = 240 - rawX;
-  return x <= 319 && y <= 239;
+  // Portrait (rotation 0): the CST820 axes map directly to the panel, so no
+  // landscape swap/invert. x spans 0..239, y spans 0..319.
+  x = rawX;
+  y = rawY;
+  return x <= 239 && y <= 319;
 }
 
 bool inside(uint16_t x, uint16_t y, int bx, int by, int bw, int bh) {
@@ -719,58 +721,58 @@ void handleTouch() {
 
   if (screen == SCREEN_MAIN) {
     // TARE ALL: tare both real nodes (A and B). C/D are decorative.
-    if (inside(x, y, 8, 196, 150, 38)) {
+    if (inside(x, y, 6, 270, 111, 40)) {
       sendCommand(0, COMMAND_TARE);
       delay(30);
       sendCommand(1, COMMAND_TARE);
-    } else if (inside(x, y, 162, 196, 150, 38)) {
+    } else if (inside(x, y, 123, 270, 111, 40)) {
       changeScreen(SCREEN_CALIBRATE);
     }
     return;
   }
 
   if (screen == SCREEN_CALIBRATE) {
-    if (inside(x, y, 14, 48, 140, 40)) {
+    if (inside(x, y, 6, 50, 111, 42)) {
       selectedNode = 0;
       staticScreenRequired = true;
-    } else if (inside(x, y, 166, 48, 140, 40)) {
+    } else if (inside(x, y, 123, 50, 111, 42)) {
       selectedNode = 1;
       staticScreenRequired = true;
-    } else if (inside(x, y, 14, 110, 60, 40)) {
+    } else if (inside(x, y, 6, 132, 60, 42)) {
       calibrationWeightKg = max(0.1f, calibrationWeightKg - 0.1f);
       staticScreenRequired = true;
-    } else if (inside(x, y, 246, 110, 60, 40)) {
+    } else if (inside(x, y, 174, 132, 60, 42)) {
       calibrationWeightKg = min(100.0f, calibrationWeightKg + 0.1f);
       staticScreenRequired = true;
-    } else if (inside(x, y, 14, 160, 140, 40) &&
+    } else if (inside(x, y, 6, 196, 111, 42) &&
                nodeConnected(selectedNode)) {
       // Individual TARE: tare only the selected cell.
       sendCommand(selectedNode, COMMAND_TARE);
-    } else if (inside(x, y, 166, 160, 140, 40) &&
+    } else if (inside(x, y, 123, 196, 111, 42) &&
                nodeConnected(selectedNode)) {
       // Enter the guided calibration wizard for the selected cell.
       changeScreen(SCREEN_CAL_WEIGHT);
-    } else if (inside(x, y, 90, 206, 140, 30)) {
+    } else if (inside(x, y, 65, 254, 110, 40)) {
       changeScreen(SCREEN_MAIN);
     }
     return;
   }
 
   if (screen == SCREEN_CAL_WEIGHT) {
-    if (inside(x, y, 20, 155, 70, 50)) {
+    if (inside(x, y, 6, 230, 68, 54)) {
       calibrationWeightKg = max(0.1f, calibrationWeightKg - 0.1f);
       staticScreenRequired = true;
-    } else if (inside(x, y, 100, 155, 70, 50)) {
+    } else if (inside(x, y, 86, 230, 68, 54)) {
       calibrationWeightKg = min(100.0f, calibrationWeightKg + 0.1f);
       staticScreenRequired = true;
-    } else if (inside(x, y, 180, 155, 120, 50)) {
+    } else if (inside(x, y, 166, 230, 68, 54)) {
       changeScreen(SCREEN_CAL_REMOVE);
     }
     return;
   }
 
   if (screen == SCREEN_CAL_REMOVE && !waitingForTare &&
-      inside(x, y, 70, 165, 180, 50)) {
+      inside(x, y, 30, 210, 180, 54)) {
     waitingForTare = true;
     sendCommand(selectedNode, COMMAND_TARE);
     staticScreenRequired = true;
@@ -778,7 +780,7 @@ void handleTouch() {
   }
 
   if (screen == SCREEN_CAL_PLACE && !waitingForCalibration &&
-      inside(x, y, 70, 165, 180, 50)) {
+      inside(x, y, 30, 210, 180, 54)) {
     waitingForCalibration = true;
     sendCommand(selectedNode, COMMAND_CALIBRATE, calibrationWeightKg);
     staticScreenRequired = true;
@@ -786,15 +788,15 @@ void handleTouch() {
   }
 
   if (screen == SCREEN_CAL_DONE &&
-      inside(x, y, 90, 170, 140, 46)) {
+      inside(x, y, 50, 210, 140, 50)) {
     changeScreen(SCREEN_MAIN);
     return;
   }
 
   if (screen == SCREEN_EXIT_CONFIRM) {
-    if (inside(x, y, 15, 165, 140, 50)) {
+    if (inside(x, y, 18, 210, 96, 54)) {
       changeScreen(screenBeforeExitConfirm);
-    } else if (inside(x, y, 165, 165, 140, 50)) {
+    } else if (inside(x, y, 126, 210, 96, 54)) {
       waitingForTare = false;
       waitingForCalibration = false;
       changeScreen(SCREEN_MAIN);
@@ -803,25 +805,25 @@ void handleTouch() {
   }
 
   if (screen == SCREEN_SETTINGS) {
-    if (inside(x, y, 220, 38, 40, 30)) {
+    if (inside(x, y, 136, 42, 46, 32)) {
       settingLockThresholdKg = max(0.0f, settingLockThresholdKg - 0.5f);
-    } else if (inside(x, y, 270, 38, 40, 30)) {
+    } else if (inside(x, y, 188, 42, 46, 32)) {
       settingLockThresholdKg = min(100.0f, settingLockThresholdKg + 0.5f);
-    } else if (inside(x, y, 220, 80, 90, 30)) {
+    } else if (inside(x, y, 150, 94, 84, 32)) {
       settingAutoLock = !settingAutoLock;
-    } else if (inside(x, y, 220, 122, 40, 30)) {
+    } else if (inside(x, y, 136, 146, 46, 32)) {
       settingBrightnessPercent =
         max(25, (int)settingBrightnessPercent - 25);
       setBacklightPercent(settingBrightnessPercent);
-    } else if (inside(x, y, 270, 122, 40, 30)) {
+    } else if (inside(x, y, 188, 146, 46, 32)) {
       settingBrightnessPercent =
         min(100, (int)settingBrightnessPercent + 25);
       setBacklightPercent(settingBrightnessPercent);
-    } else if (inside(x, y, 220, 164, 90, 30)) {
+    } else if (inside(x, y, 150, 198, 84, 32)) {
       settingDecimals = settingDecimals == 2 ? 3 : 2;
-    } else if (inside(x, y, 15, 214, 135, 24)) {
+    } else if (inside(x, y, 6, 270, 111, 40)) {
       changeScreen(SCREEN_MAIN);
-    } else if (inside(x, y, 170, 214, 135, 24)) {
+    } else if (inside(x, y, 123, 270, 111, 40)) {
       saveDisplaySettings();
       changeScreen(SCREEN_MAIN);
     }
@@ -851,7 +853,7 @@ void setup() {
   settingAutoLock = preferences.getBool("autoLock", true);
 
   lcd.init();
-  lcd.setRotation(1);
+  lcd.setRotation(0);
   setBacklightPercent(settingBrightnessPercent);
   lcd.fillScreen(TFT_BLACK);
 
