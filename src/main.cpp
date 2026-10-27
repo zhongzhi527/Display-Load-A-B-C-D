@@ -37,6 +37,7 @@ uint8_t nodeMac[2][6] = {
 
 enum Screen : uint8_t {
   SCREEN_MAIN,
+  SCREEN_LINK,
   SCREEN_CALIBRATE,
   SCREEN_CAL_WEIGHT,
   SCREEN_CAL_REMOVE,
@@ -248,6 +249,47 @@ void drawHeader(const char* title) {
   updateHeaderIndicators(true);
 }
 
+// Dashboard header in the Display-Load-A-B style: the "QUAD SCALE" title on the
+// left, then LINK and SET buttons on the right. LINK opens the link-status
+// page; SET opens settings. The A/B connection dots are shown under LINK.
+void drawDashboardHeader() {
+  lcd.fillRect(0, 0, 240, 28, TFT_DARKGREY);
+  lcd.setTextDatum(middle_left);
+  lcd.setTextColor(TFT_WHITE, TFT_DARKGREY);
+  lcd.setTextSize(1);
+  lcd.drawString("QUAD SCALE", 8, 14);
+
+  // LINK button (coloured by overall connection) and SET button.
+  const uint32_t linkColor =
+      (nodeConnected(0) && nodeConnected(1)) ? TFT_GREEN
+      : (nodeConnected(0) || nodeConnected(1)) ? TFT_ORANGE
+                                               : TFT_RED;
+  drawButton(96, 2, 64, 24, "LINK", TFT_BLUE);
+  lcd.drawRoundRect(96, 2, 64, 24, 7, linkColor);
+  drawButton(166, 2, 66, 24, "SET", TFT_DARKGREY);
+  paintedHeaderConnected[0] = nodeConnected(0);
+  paintedHeaderConnected[1] = nodeConnected(1);
+  paintedHeaderValid = true;
+}
+
+// Recolour the LINK button border when the overall connection state changes,
+// so the dashboard header shows link status live without a full redraw.
+void updateDashboardLink() {
+  bool a = nodeConnected(0);
+  bool b = nodeConnected(1);
+  if (paintedHeaderValid &&
+      paintedHeaderConnected[0] == a &&
+      paintedHeaderConnected[1] == b) {
+    return;
+  }
+  const uint32_t linkColor =
+      (a && b) ? TFT_GREEN : (a || b) ? TFT_ORANGE : TFT_RED;
+  lcd.drawRoundRect(96, 2, 64, 24, 7, linkColor);
+  paintedHeaderConnected[0] = a;
+  paintedHeaderConnected[1] = b;
+  paintedHeaderValid = true;
+}
+
 void formatWeight(char* buffer, size_t len, float value, bool connected) {
   if (!connected) {
     snprintf(buffer, len, "--");
@@ -286,7 +328,7 @@ void drawDecorativeCell(const char* label, int y) {
 
 void drawMainStatic() {
   lcd.fillScreen(TFT_BLACK);
-  drawHeader("WIRELESS SCALE");
+  drawDashboardHeader();
 
   // Real cells A and B (updated live by updateMainNode).
   lcd.drawRoundRect(6, CELL_ROW_Y[0], 228, CELL_ROW_H, 6, TFT_DARKGREY);
@@ -472,6 +514,33 @@ void drawExitConfirm() {
   drawButton(126, 210, 96, 54, "YES", TFT_RED);
 }
 
+// LINK status page: shows the connection state of each cell. A and B are the
+// real nodes; C and D are decorative (always offline) to match the dashboard.
+void drawLinkStatus() {
+  lcd.fillScreen(TFT_BLACK);
+  drawHeader("LINK STATUS");
+
+  const char* labels[4] = {"LOAD CELL A", "LOAD CELL B",
+                           "LOAD CELL C", "LOAD CELL D"};
+  for (uint8_t i = 0; i < 4; i++) {
+    int y = 40 + i * 40;
+    lcd.drawRoundRect(6, y, 228, 34, 6, TFT_DARKGREY);
+    lcd.setTextDatum(middle_left);
+    lcd.setTextSize(1);
+    lcd.setTextColor(i < 2 ? TFT_WHITE : TFT_DARKGREY, TFT_BLACK);
+    lcd.drawString(labels[i], 14, y + 17);
+
+    bool connected = (i < 2) && nodeConnected(i);
+    lcd.setTextDatum(middle_right);
+    lcd.setTextColor(i < 2 ? (connected ? TFT_GREEN : TFT_RED) : TFT_DARKGREY,
+                     TFT_BLACK);
+    lcd.drawString(i < 2 ? (connected ? "CONNECTED" : "OFFLINE") : "N/A",
+                   226, y + 17);
+  }
+
+  drawButton(65, 270, 110, 40, "HOME", TFT_DARKGREY);
+}
+
 void drawSettings() {
   lcd.fillScreen(TFT_BLACK);
   drawHeader("SETTINGS");
@@ -510,6 +579,7 @@ void renderScreen() {
   if (staticScreenRequired) {
     switch (screen) {
       case SCREEN_MAIN: drawMainStatic(); break;
+      case SCREEN_LINK: drawLinkStatus(); break;
       case SCREEN_CALIBRATE: drawCalibrateStatic(); break;
       case SCREEN_CAL_WEIGHT: drawCalWeight(); break;
       case SCREEN_CAL_REMOVE: drawCalRemove(); break;
@@ -522,12 +592,20 @@ void renderScreen() {
   }
 
   if (screen == SCREEN_MAIN) {
-    updateHeaderIndicators();
+    updateDashboardLink();
     updateMainNode(0);
     updateMainNode(1);
     updateMainTotal();
-  } else if (screen == SCREEN_CALIBRATE) {
-    updateHeaderIndicators();
+  } else if (screen == SCREEN_LINK) {
+    // Redraw only when a real cell's connection state changes, so the page
+    // reflects live link status without flickering every loop.
+    bool a = nodeConnected(0);
+    bool b = nodeConnected(1);
+    if (paintedHeaderConnected[0] != a || paintedHeaderConnected[1] != b) {
+      paintedHeaderConnected[0] = a;
+      paintedHeaderConnected[1] = b;
+      staticScreenRequired = true;
+    }
   }
 }
 
@@ -720,13 +798,26 @@ void handleTouch() {
   registerActivity();
 
   if (screen == SCREEN_MAIN) {
+    // Header LINK / SET buttons.
+    if (inside(x, y, 96, 2, 64, 24)) {
+      changeScreen(SCREEN_LINK);
+    } else if (inside(x, y, 166, 2, 66, 24)) {
+      changeScreen(SCREEN_SETTINGS);
+    }
     // TARE ALL: tare both real nodes (A and B). C/D are decorative.
-    if (inside(x, y, 6, 270, 111, 40)) {
+    else if (inside(x, y, 6, 270, 111, 40)) {
       sendCommand(0, COMMAND_TARE);
       delay(30);
       sendCommand(1, COMMAND_TARE);
     } else if (inside(x, y, 123, 270, 111, 40)) {
       changeScreen(SCREEN_CALIBRATE);
+    }
+    return;
+  }
+
+  if (screen == SCREEN_LINK) {
+    if (inside(x, y, 65, 270, 110, 40)) {
+      changeScreen(SCREEN_MAIN);
     }
     return;
   }
