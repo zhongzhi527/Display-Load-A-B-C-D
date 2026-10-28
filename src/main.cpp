@@ -328,32 +328,14 @@ void drawButton(int x, int y, int w, int h, const char* label,
   lcd.drawString(label, x + w / 2, y + h / 2);
 }
 
-void updateHeaderIndicators(bool force = false) {
-  for (uint8_t i = 0; i < 2; i++) {
-    bool connected = nodeConnected(i);
-    if (!force && paintedHeaderValid &&
-        paintedHeaderConnected[i] == connected) {
-      continue;
-    }
-
-    int x = i == 0 ? 186 : 212;
-    lcd.fillRect(x, 3, 24, 22, COLOR_PANEL);
-    lcd.setTextDatum(middle_center);
-    lcd.setTextSize(1);
-    lcd.setTextColor(connected ? COLOR_SUCCESS : COLOR_DANGER, COLOR_PANEL);
-    lcd.drawString(i == 0 ? "A" : "B", x + 12, 14);
-    paintedHeaderConnected[i] = connected;
-  }
-  paintedHeaderValid = true;
-}
-
 void drawHeader(const char* title) {
   lcd.fillRect(0, 0, 240, 28, COLOR_PANEL);
   lcd.setTextDatum(middle_center);
   lcd.setTextColor(TFT_WHITE, COLOR_PANEL);
   lcd.setTextSize(2);
   lcd.drawString(title, 120, 14);
-  updateHeaderIndicators(true);
+  // No A/B connection letters on sub-page headers (CALIBRATE/SETTINGS/LINK/
+  // wizard) - they belong only on the dashboard, shown via the LINK button.
 }
 
 // Sample the battery pin and update the cached percentage. Ported from the
