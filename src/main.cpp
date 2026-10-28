@@ -849,11 +849,12 @@ void drawCalKnownWeight() {
   lcd.drawString(text, 120, CAL_KW_PANEL_Y + 36);
 }
 
-// Redraw the full-width TARE and CALIBRATE buttons for the selected cell.
-// TARE = COLOR_PANEL_LIGHT fill + COLOR_PRIMARY border; CALIBRATE =
-// COLOR_PRIMARY fill + COLOR_PRIMARY border. For C/D (decorative, never
-// connected) both are drawn disabled (greyed). `pressedTare`/`pressedCal`
-// force the highlighted look for brief tap feedback.
+// Redraw the full-width TARE and CALIBRATE buttons for the selected cell. Both
+// rest in the grey look (COLOR_PANEL_LIGHT fill + COLOR_MUTED border) like
+// every other calibrate control, and light up blue (COLOR_PRIMARY) only while
+// pressed. For C/D (decorative, never connected) both are drawn disabled
+// (greyed, text muted). `pressedTare`/`pressedCal` force the pressed look for
+// brief tap feedback.
 void drawCalActionButtons(bool pressedTare = false, bool pressedCal = false) {
   char letter = calCellLetter(calSelectedCell);
   bool connected = calCellConnected(calSelectedCell);
@@ -864,9 +865,10 @@ void drawCalActionButtons(bool pressedTare = false, bool pressedCal = false) {
 
   drawButton(6, CAL_TARE_Y, 228, CAL_TARE_H, tareLabel,
              pressedTare ? COLOR_PRIMARY : COLOR_PANEL_LIGHT, connected,
-             COLOR_PRIMARY);
-  drawButton(6, CAL_CAL_Y, 228, CAL_CAL_H, calLabel, COLOR_PRIMARY, connected,
-             COLOR_PRIMARY);
+             pressedTare ? COLOR_PRIMARY : COLOR_MUTED);
+  drawButton(6, CAL_CAL_Y, 228, CAL_CAL_H, calLabel,
+             pressedCal ? COLOR_PRIMARY : COLOR_PANEL_LIGHT, connected,
+             pressedCal ? COLOR_PRIMARY : COLOR_MUTED);
 }
 
 // Set and draw the calibrate-page status message (clears the strip first so it
