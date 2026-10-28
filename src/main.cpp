@@ -29,6 +29,23 @@ constexpr unsigned long TOUCH_DEBOUNCE_MS = 220;
 constexpr unsigned long BUTTON_DEBOUNCE_MS = 40;
 constexpr unsigned long BUTTON_LONG_PRESS_MS = 2000;
 
+// Shared colour palette (RGB565), matching the Display-Load-A-B (DUAL SCALE)
+// firmware: a dark navy screen with slate panels and palette-tinted text.
+constexpr uint16_t COLOR_BACKGROUND  = 0x0083;  // dark navy screen bg
+constexpr uint16_t COLOR_PANEL       = 0x08E5;  // slate panel fill
+constexpr uint16_t COLOR_PANEL_LIGHT = 0x1188;  // lighter slate (button fill)
+constexpr uint16_t COLOR_PRIMARY     = 0x047E;  // blue
+constexpr uint16_t COLOR_SUCCESS     = 0x3EEE;  // green
+constexpr uint16_t COLOR_WARNING     = 0xF5A6;  // amber
+constexpr uint16_t COLOR_DANGER      = 0xF228;  // red
+constexpr uint16_t COLOR_MUTED       = 0x8D16;  // grey
+
+// Pulsing-border animation timing (half periods, in ms) and service cadence.
+constexpr uint32_t BLINK_SEARCH_MS = 700;
+constexpr uint32_t BLINK_ATTENTION_MS = 900;
+constexpr uint32_t BLINK_ERROR_MS = 800;
+constexpr unsigned long BORDER_SERVICE_MS = 50;
+
 // MAC addresses of the two load-cell nodes (A and B).
 uint8_t nodeMac[2][6] = {
   {0xE0, 0xE2, 0xE6, 0xD7, 0x3E, 0xD4}, // A
@@ -134,6 +151,12 @@ bool paintedLocked[2] = {false, false};
 bool paintedHeaderConnected[2] = {false, false};
 bool paintedHeaderValid = false;
 
+// Last border colour drawn for each real cell panel (A=0, B=1). Sentinel
+// 0xFFFF forces a redraw on the next service pass. Used by
+// serviceDashboardBorders() to avoid redrawing (and flickering) the border
+// when the animated colour has not changed.
+uint16_t cellBorderDrawn[2] = {0xFFFF, 0xFFFF};
+
 void setBacklightPercent(uint8_t percent) {
   percent = constrain(percent, 0, 100);
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
@@ -180,15 +203,59 @@ const char* statusText(uint8_t i) {
 }
 
 uint32_t statusColor(uint8_t i) {
-  if (!nodeConnected(i)) return TFT_RED;
-  if (nodes[i].locked || nodes[i].status == STATUS_STABLE) return TFT_GREEN;
+  if (!nodeConnected(i)) return COLOR_DANGER;             // OFFLINE
+  if (nodes[i].locked || nodes[i].status == STATUS_STABLE)
+    return COLOR_SUCCESS;                                 // STABLE / LOCKED
   switch (nodes[i].status) {
-    case STATUS_TARING: return TFT_BLUE;
-    case STATUS_CALIBRATING: return TFT_ORANGE;
-    case STATUS_CALIBRATION_COMPLETE: return TFT_GREEN;
-    case STATUS_ERROR: return TFT_RED;
-    default: return TFT_YELLOW;
+    case STATUS_CALIBRATION_COMPLETE: return COLOR_SUCCESS;  // CAL COMPLETE
+    case STATUS_ERROR: return COLOR_DANGER;                  // ERROR
+    // In-progress states: SEARCHING / STABILIZING / TARING / CALIBRATING.
+    case STATUS_TARING:
+    case STATUS_CALIBRATING:
+    default: return COLOR_WARNING;
   }
+}
+
+// Weighted blend of two RGB565 colours: returns fg mixed over bg with
+// fgWeight/255 of fg (0 = all bg, 255 = all fg). Channels are unpacked to
+// 5/6/5, averaged with +127 rounding, and repacked. Copied from the DUAL
+// display so the pulsing "dim" phase glows instead of turning off.
+uint16_t blendRgb565(uint16_t fg, uint16_t bg, uint8_t fgWeight) {
+  uint16_t bgWeight = 255 - fgWeight;
+  uint16_t fr = (fg >> 11) & 0x1F, fgn = (fg >> 5) & 0x3F, fb = fg & 0x1F;
+  uint16_t br = (bg >> 11) & 0x1F, bgn = (bg >> 5) & 0x3F, bb = bg & 0x1F;
+  uint16_t r = (fr * fgWeight + br * bgWeight + 127) / 255;
+  uint16_t g = (fgn * fgWeight + bgn * bgWeight + 127) / 255;
+  uint16_t b = (fb * fgWeight + bb * bgWeight + 127) / 255;
+  return (uint16_t)((r << 11) | (g << 5) | b);
+}
+
+// Animated border colour: alternates between the full "bright" colour and a
+// dim glow (72/255 of bright blended over the panel fill) every halfPeriodMs.
+// The dim phase never fully turns off, so the border pulses/glows.
+uint16_t animatedBorderColor(uint16_t bright, uint32_t halfPeriodMs) {
+  bool brightPhase = ((millis() / halfPeriodMs) & 1U) == 0;
+  return brightPhase ? bright : blendRgb565(bright, COLOR_PANEL, 72);
+}
+
+// Border colour for a real cell panel (A=0, B=1), driven by its live state:
+//   connected + READY/STABLE/LOCKED -> solid green (no blink)
+//   connected but working           -> pulsing amber (attention)
+//   error                           -> pulsing red
+//   offline / searching             -> pulsing amber (trying to connect)
+uint16_t cellBorderColor(uint8_t i) {
+  if (nodeConnected(i)) {
+    if (nodes[i].status == STATUS_ERROR)
+      return animatedBorderColor(COLOR_DANGER, BLINK_ERROR_MS);
+    if (nodes[i].locked ||
+        nodes[i].status == STATUS_STABLE ||
+        nodes[i].status == STATUS_CALIBRATION_COMPLETE)
+      return COLOR_SUCCESS;  // connected + ready -> solid green
+    // In-progress (TARING / CALIBRATING / STABILIZING / MEASURING).
+    return animatedBorderColor(COLOR_WARNING, BLINK_ATTENTION_MS);
+  }
+  // Not connected: pulse amber while trying to connect / searching.
+  return animatedBorderColor(COLOR_WARNING, BLINK_SEARCH_MS);
 }
 
 void registerActivity() {
@@ -202,6 +269,7 @@ void resetPaintCache() {
   paintedConnected[0] = paintedConnected[1] = false;
   paintedLocked[0] = paintedLocked[1] = false;
   paintedHeaderValid = false;
+  cellBorderDrawn[0] = cellBorderDrawn[1] = 0xFFFF;
 }
 
 void changeScreen(Screen next) {
@@ -210,13 +278,26 @@ void changeScreen(Screen next) {
   resetPaintCache();
 }
 
+// Draw a palette button. `color` is the fill colour (one of the COLOR_*
+// palette entries); `borderColor` tints the outline (0 = auto: a lighter tint
+// of the fill). The label is white. Disabled buttons fall back to a muted
+// slate fill/outline. Positions, sizes and labels are unchanged from before.
 void drawButton(int x, int y, int w, int h, const char* label,
-                uint32_t color, bool enabled = true) {
-  uint32_t c = enabled ? color : TFT_DARKGREY;
+                uint32_t color, bool enabled = true,
+                uint16_t borderColor = 0) {
+  uint32_t c = enabled ? color : COLOR_PANEL;
+  uint16_t border;
+  if (!enabled) {
+    border = COLOR_MUTED;
+  } else if (borderColor != 0) {
+    border = borderColor;
+  } else {
+    border = blendRgb565((uint16_t)color, 0xFFFF, 150);  // lighter tint of fill
+  }
   lcd.fillRoundRect(x, y, w, h, 7, c);
-  lcd.drawRoundRect(x, y, w, h, 7, enabled ? TFT_WHITE : TFT_LIGHTGREY);
+  lcd.drawRoundRect(x, y, w, h, 7, border);
   lcd.setTextDatum(middle_center);
-  lcd.setTextColor(enabled ? TFT_WHITE : TFT_LIGHTGREY, c);
+  lcd.setTextColor(enabled ? TFT_WHITE : COLOR_MUTED, c);
   lcd.setTextSize(1);
   lcd.drawString(label, x + w / 2, y + h / 2);
 }
@@ -230,10 +311,10 @@ void updateHeaderIndicators(bool force = false) {
     }
 
     int x = i == 0 ? 186 : 212;
-    lcd.fillRect(x, 3, 24, 22, TFT_DARKGREY);
+    lcd.fillRect(x, 3, 24, 22, COLOR_PANEL);
     lcd.setTextDatum(middle_center);
     lcd.setTextSize(1);
-    lcd.setTextColor(connected ? TFT_GREEN : TFT_RED, TFT_DARKGREY);
+    lcd.setTextColor(connected ? COLOR_SUCCESS : COLOR_DANGER, COLOR_PANEL);
     lcd.drawString(i == 0 ? "A" : "B", x + 12, 14);
     paintedHeaderConnected[i] = connected;
   }
@@ -241,9 +322,9 @@ void updateHeaderIndicators(bool force = false) {
 }
 
 void drawHeader(const char* title) {
-  lcd.fillRect(0, 0, 240, 28, TFT_DARKGREY);
+  lcd.fillRect(0, 0, 240, 28, COLOR_PANEL);
   lcd.setTextDatum(middle_center);
-  lcd.setTextColor(TFT_WHITE, TFT_DARKGREY);
+  lcd.setTextColor(TFT_WHITE, COLOR_PANEL);
   lcd.setTextSize(2);
   lcd.drawString(title, 120, 14);
   updateHeaderIndicators(true);
@@ -253,20 +334,20 @@ void drawHeader(const char* title) {
 // left, then LINK and SET buttons on the right. LINK opens the link-status
 // page; SET opens settings. The A/B connection dots are shown under LINK.
 void drawDashboardHeader() {
-  lcd.fillRect(0, 0, 240, 28, TFT_DARKGREY);
+  lcd.fillRect(0, 0, 240, 28, COLOR_PANEL);
   lcd.setTextDatum(middle_left);
-  lcd.setTextColor(TFT_WHITE, TFT_DARKGREY);
+  lcd.setTextColor(TFT_WHITE, COLOR_PANEL);
   lcd.setTextSize(1);
   lcd.drawString("QUAD SCALE", 8, 14);
 
-  // LINK button (coloured by overall connection) and SET button.
+  // LINK button (border coloured by overall connection) and SET button.
   const uint32_t linkColor =
-      (nodeConnected(0) && nodeConnected(1)) ? TFT_GREEN
-      : (nodeConnected(0) || nodeConnected(1)) ? TFT_ORANGE
-                                               : TFT_RED;
-  drawButton(96, 2, 64, 24, "LINK", TFT_BLUE);
+      (nodeConnected(0) && nodeConnected(1)) ? COLOR_SUCCESS
+      : (nodeConnected(0) || nodeConnected(1)) ? COLOR_WARNING
+                                               : COLOR_DANGER;
+  drawButton(96, 2, 64, 24, "LINK", COLOR_PRIMARY);
   lcd.drawRoundRect(96, 2, 64, 24, 7, linkColor);
-  drawButton(166, 2, 66, 24, "SET", TFT_DARKGREY);
+  drawButton(166, 2, 66, 24, "SET", COLOR_PANEL_LIGHT, true, COLOR_MUTED);
   paintedHeaderConnected[0] = nodeConnected(0);
   paintedHeaderConnected[1] = nodeConnected(1);
   paintedHeaderValid = true;
@@ -283,7 +364,7 @@ void updateDashboardLink() {
     return;
   }
   const uint32_t linkColor =
-      (a && b) ? TFT_GREEN : (a || b) ? TFT_ORANGE : TFT_RED;
+      (a && b) ? COLOR_SUCCESS : (a || b) ? COLOR_WARNING : COLOR_DANGER;
   lcd.drawRoundRect(96, 2, 64, 24, 7, linkColor);
   paintedHeaderConnected[0] = a;
   paintedHeaderConnected[1] = b;
@@ -311,31 +392,39 @@ constexpr int TOTAL_ROW_H = 44;
 // Draw a decorative (C/D) cell row once: greyed out, always OFFLINE / "--".
 // These rows are not tappable and never carry a node's data.
 void drawDecorativeCell(const char* label, int y) {
-  lcd.drawRoundRect(6, y, 228, CELL_ROW_H, 6, TFT_DARKGREY);
+  // Filled slate panel with a static muted border (decorative: always OFFLINE).
+  lcd.fillRoundRect(6, y, 228, CELL_ROW_H, 6, COLOR_PANEL);
+  lcd.drawRoundRect(6, y, 228, CELL_ROW_H, 6, COLOR_MUTED);
   lcd.setTextDatum(top_left);
   lcd.setTextSize(1);
-  lcd.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  lcd.setTextColor(COLOR_MUTED, COLOR_PANEL);
   lcd.drawString(label, 14, y + 6);
   lcd.drawString("OFFLINE", 14, y + 24);
 
   lcd.setTextDatum(middle_right);
   lcd.setTextSize(2);
-  lcd.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  lcd.setTextColor(COLOR_MUTED, COLOR_PANEL);
   lcd.drawString("--", 206, y + CELL_ROW_H / 2);
   lcd.setTextSize(1);
   lcd.drawString("kg", 228, y + CELL_ROW_H / 2 + 1);
 }
 
 void drawMainStatic() {
-  lcd.fillScreen(TFT_BLACK);
+  lcd.fillScreen(COLOR_BACKGROUND);
   drawDashboardHeader();
 
-  // Real cells A and B (updated live by updateMainNode).
-  lcd.drawRoundRect(6, CELL_ROW_Y[0], 228, CELL_ROW_H, 6, TFT_DARKGREY);
-  lcd.drawRoundRect(6, CELL_ROW_Y[1], 228, CELL_ROW_H, 6, TFT_DARKGREY);
+  // Real cells A and B (updated live by updateMainNode). Each panel is filled
+  // slate, with an animated status-coloured border drawn on top. Seed the
+  // border cache so serviceDashboardBorders() stays in sync with this draw.
+  for (uint8_t i = 0; i < 2; i++) {
+    uint16_t border = cellBorderColor(i);
+    lcd.fillRoundRect(6, CELL_ROW_Y[i], 228, CELL_ROW_H, 6, COLOR_PANEL);
+    lcd.drawRoundRect(6, CELL_ROW_Y[i], 228, CELL_ROW_H, 6, border);
+    cellBorderDrawn[i] = border;
+  }
   lcd.setTextDatum(top_left);
   lcd.setTextSize(1);
-  lcd.setTextColor(TFT_WHITE, TFT_BLACK);
+  lcd.setTextColor(TFT_WHITE, COLOR_PANEL);
   lcd.drawString("LOAD CELL A", 14, CELL_ROW_Y[0] + 6);
   lcd.drawString("LOAD CELL B", 14, CELL_ROW_Y[1] + 6);
 
@@ -343,17 +432,26 @@ void drawMainStatic() {
   drawDecorativeCell("LOAD CELL C", CELL_ROW_Y[2]);
   drawDecorativeCell("LOAD CELL D", CELL_ROW_Y[3]);
 
-  // Total row (A + B only).
-  lcd.drawRoundRect(6, TOTAL_ROW_Y, 228, TOTAL_ROW_H, 6, TFT_CYAN);
+  // Total row (A + B only): filled slate panel with a success/muted border.
+  bool totalValid = (nodeConnected(0) || nodeConnected(1)) &&
+                    fabsf(totalWeightKg()) >= 0.001f;
+  lcd.fillRoundRect(6, TOTAL_ROW_Y, 228, TOTAL_ROW_H, 6, COLOR_PANEL);
+  lcd.drawRoundRect(6, TOTAL_ROW_Y, 228, TOTAL_ROW_H, 6,
+                    totalValid ? COLOR_SUCCESS : COLOR_MUTED);
   lcd.setTextDatum(top_left);
   lcd.setTextSize(1);
-  lcd.setTextColor(TFT_CYAN, TFT_BLACK);
+  lcd.setTextColor(COLOR_PRIMARY, COLOR_PANEL);
   lcd.drawString("TOTAL", 14, TOTAL_ROW_Y + 6);
 
   // Global action buttons.
-  drawButton(6, 270, 111, 40, "TARE ALL", TFT_BLUE);
-  drawButton(123, 270, 111, 40, "CALIBRATE", TFT_ORANGE);
+  drawButton(6, 270, 111, 40, "TARE ALL", COLOR_PRIMARY);
+  drawButton(123, 270, 111, 40, "CALIBRATE", COLOR_PANEL_LIGHT, true,
+             COLOR_WARNING);
   resetPaintCache();
+  // resetPaintCache() clears the border cache; re-seed it to match what we
+  // just drew so the animated border does not immediately repaint.
+  cellBorderDrawn[0] = cellBorderColor(0);
+  cellBorderDrawn[1] = cellBorderColor(1);
 }
 
 void updateMainNode(uint8_t i) {
@@ -368,103 +466,141 @@ void updateMainNode(uint8_t i) {
 
   if (!changed) return;
 
-  // Clear the status line (under the label) and the weight area.
-  lcd.fillRect(14, y + 23, 110, 14, TFT_BLACK);
-  lcd.fillRect(110, y + 2, 122, CELL_ROW_H - 4, TFT_BLACK);
+  // Clear the status line (under the label) and the weight area to the panel
+  // fill so no black box appears around the text.
+  lcd.fillRect(14, y + 23, 110, 14, COLOR_PANEL);
+  lcd.fillRect(110, y + 2, 122, CELL_ROW_H - 4, COLOR_PANEL);
 
   lcd.setTextDatum(top_left);
   lcd.setTextSize(1);
-  lcd.setTextColor(statusColor(i), TFT_BLACK);
+  lcd.setTextColor(statusColor(i), COLOR_PANEL);
   lcd.drawString(statusText(i), 14, y + 24);
 
   char text[24];
   formatWeight(text, sizeof(text), nodes[i].weightKg, connected);
   lcd.setTextDatum(middle_right);
-  lcd.setTextColor(TFT_WHITE, TFT_BLACK);
+  lcd.setTextColor(connected ? TFT_WHITE : COLOR_MUTED, COLOR_PANEL);
   lcd.setTextSize(2);
   lcd.drawString(text, 206, y + CELL_ROW_H / 2);
   lcd.setTextSize(1);
-  lcd.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  lcd.setTextColor(COLOR_MUTED, COLOR_PANEL);
   lcd.drawString("kg", 228, y + CELL_ROW_H / 2 + 1);
 
   paintedWeight[i] = nodes[i].weightKg;
   paintedStatus[i] = nodes[i].status;
   paintedConnected[i] = connected;
   paintedLocked[i] = nodes[i].locked;
+
+  // The weight-area clear painted over the right edge of the panel border;
+  // redraw the border and re-sync the cache so the animated border and this
+  // static repaint stay consistent.
+  uint16_t border = cellBorderColor(i);
+  lcd.drawRoundRect(6, y, 228, CELL_ROW_H, 6, border);
+  cellBorderDrawn[i] = border;
 }
 
 void updateMainTotal() {
   float total = totalWeightKg();
   if (!isnan(paintedTotal) && fabsf(total - paintedTotal) < 0.001f) return;
 
-  lcd.fillRect(70, TOTAL_ROW_Y + 2, 162, TOTAL_ROW_H - 4, TFT_BLACK);
+  lcd.fillRect(70, TOTAL_ROW_Y + 2, 162, TOTAL_ROW_H - 4, COLOR_PANEL);
   char text[24];
   formatWeight(text, sizeof(text), total, true);
 
   lcd.setTextDatum(middle_right);
   lcd.setTextSize(3);
-  lcd.setTextColor(TFT_WHITE, TFT_BLACK);
+  lcd.setTextColor(TFT_WHITE, COLOR_PANEL);
   lcd.drawString(text, 206, TOTAL_ROW_Y + TOTAL_ROW_H / 2);
   lcd.setTextSize(1);
-  lcd.setTextColor(TFT_CYAN, TFT_BLACK);
+  lcd.setTextColor(COLOR_SUCCESS, COLOR_PANEL);
   lcd.drawString("kg", 228, TOTAL_ROW_Y + TOTAL_ROW_H / 2 + 1);
   paintedTotal = total;
+
+  // Redraw the total panel border (the clear reached its right edge) with the
+  // success/muted tint based on whether the total is valid/non-zero.
+  bool totalValid = (nodeConnected(0) || nodeConnected(1)) &&
+                    fabsf(total) >= 0.001f;
+  lcd.drawRoundRect(6, TOTAL_ROW_Y, 228, TOTAL_ROW_H, 6,
+                    totalValid ? COLOR_SUCCESS : COLOR_MUTED);
+}
+
+// Drive the pulsing/blinking borders of the A/B cell panels on the dashboard.
+// Throttled to BORDER_SERVICE_MS; only redraws a panel's border when its
+// animated colour actually changes (tracked in cellBorderDrawn[]), so the
+// panels glow smoothly without flicker. No-op off the main dashboard.
+void serviceDashboardBorders() {
+  if (screen != SCREEN_MAIN) return;
+  static unsigned long lastMs = 0;
+  unsigned long now = millis();
+  if (now - lastMs < BORDER_SERVICE_MS) return;
+  lastMs = now;
+
+  for (uint8_t i = 0; i < 2; i++) {
+    uint16_t color = cellBorderColor(i);
+    if (color != cellBorderDrawn[i]) {
+      lcd.drawRoundRect(6, CELL_ROW_Y[i], 228, CELL_ROW_H, 6, color);
+      cellBorderDrawn[i] = color;
+    }
+  }
 }
 
 // Calibration cell-picker page (Display-Load-A-B style). Pick A or B, adjust
 // the known weight, tare the selected cell, or start the guided calibration.
 // Only the two real cells are selectable.
 void drawCalibrateStatic() {
-  lcd.fillScreen(TFT_BLACK);
+  lcd.fillScreen(COLOR_BACKGROUND);
   drawHeader("CALIBRATE");
 
   // Cell selector (A / B). The selected cell is highlighted.
   lcd.setTextDatum(top_left);
   lcd.setTextSize(1);
-  lcd.setTextColor(TFT_WHITE, TFT_BLACK);
+  lcd.setTextColor(TFT_WHITE, COLOR_BACKGROUND);
   lcd.drawString("SELECT CELL", 14, 36);
   drawButton(6, 50, 111, 42, "CELL A",
-             selectedNode == 0 ? TFT_GREEN : TFT_DARKGREY);
+             selectedNode == 0 ? COLOR_SUCCESS : COLOR_PANEL_LIGHT, true,
+             selectedNode == 0 ? 0 : COLOR_MUTED);
   drawButton(123, 50, 111, 42, "CELL B",
-             selectedNode == 1 ? TFT_GREEN : TFT_DARKGREY);
+             selectedNode == 1 ? COLOR_SUCCESS : COLOR_PANEL_LIGHT, true,
+             selectedNode == 1 ? 0 : COLOR_MUTED);
 
   // Known weight with +/- adjust.
   lcd.setTextDatum(top_left);
   lcd.setTextSize(1);
-  lcd.setTextColor(TFT_WHITE, TFT_BLACK);
+  lcd.setTextColor(TFT_WHITE, COLOR_BACKGROUND);
   lcd.drawString("KNOWN WEIGHT", 14, 104);
 
   char text[20];
   snprintf(text, sizeof(text), "%.1f kg", calibrationWeightKg);
   lcd.setTextDatum(middle_center);
-  lcd.setTextColor(TFT_YELLOW, TFT_BLACK);
+  lcd.setTextColor(COLOR_WARNING, COLOR_BACKGROUND);
   lcd.setTextSize(3);
   lcd.drawString(text, 120, 153);
 
-  drawButton(6, 132, 60, 42, "-", TFT_BLUE);
-  drawButton(174, 132, 60, 42, "+", TFT_BLUE);
+  drawButton(6, 132, 60, 42, "-", COLOR_PRIMARY);
+  drawButton(174, 132, 60, 42, "+", COLOR_PRIMARY);
 
   // Per-cell actions.
   bool connected = nodeConnected(selectedNode);
-  drawButton(6, 196, 111, 42, "TARE", TFT_BLUE, connected);
-  drawButton(123, 196, 111, 42, "CALIBRATE", TFT_ORANGE, connected);
+  drawButton(6, 196, 111, 42, "TARE", COLOR_PRIMARY, connected);
+  drawButton(123, 196, 111, 42, "CALIBRATE", COLOR_PANEL_LIGHT, connected,
+             COLOR_WARNING);
 
   // Navigation.
-  drawButton(65, 254, 110, 40, "HOME", TFT_DARKGREY);
+  drawButton(65, 254, 110, 40, "HOME", COLOR_PANEL_LIGHT, true, COLOR_MUTED);
   resetPaintCache();
 }
 
 void drawSimpleMessage(const char* title, const char* line1,
                        const char* line2 = nullptr) {
-  lcd.fillScreen(TFT_BLACK);
+  lcd.fillScreen(COLOR_BACKGROUND);
   drawHeader(title);
   lcd.setTextDatum(top_center);
-  lcd.setTextColor(TFT_WHITE, TFT_BLACK);
+  lcd.setTextColor(TFT_WHITE, COLOR_BACKGROUND);
   lcd.setTextSize(2);
   lcd.drawString(line1, 120, 70);
   if (line2) {
     lcd.setTextSize(1);
-    lcd.setTextColor(TFT_YELLOW, TFT_BLACK);
+    lcd.setTextColor(COLOR_WARNING, COLOR_BACKGROUND);
     lcd.drawString(line2, 120, 120);
   }
 }
@@ -476,20 +612,20 @@ void drawCalWeight() {
   char text[20];
   snprintf(text, sizeof(text), "%.1f kg", calibrationWeightKg);
   lcd.setTextDatum(middle_center);
-  lcd.setTextColor(TFT_YELLOW, TFT_BLACK);
+  lcd.setTextColor(COLOR_WARNING, COLOR_BACKGROUND);
   lcd.setTextSize(4);
   lcd.drawString(text, 120, 165);
 
-  drawButton(6, 230, 68, 54, "-", TFT_BLUE);
-  drawButton(86, 230, 68, 54, "+", TFT_BLUE);
-  drawButton(166, 230, 68, 54, "NEXT", TFT_GREEN);
+  drawButton(6, 230, 68, 54, "-", COLOR_PRIMARY);
+  drawButton(86, 230, 68, 54, "+", COLOR_PRIMARY);
+  drawButton(166, 230, 68, 54, "NEXT", COLOR_SUCCESS);
 }
 
 void drawCalRemove() {
   drawSimpleMessage("STEP 1 OF 2",
                     waitingForTare ? "Taring..." : "Remove all weight",
                     waitingForTare ? "Please wait" : "Then press TARE");
-  if (!waitingForTare) drawButton(30, 210, 180, 54, "TARE", TFT_BLUE);
+  if (!waitingForTare) drawButton(30, 210, 180, 54, "TARE", COLOR_PRIMARY);
 }
 
 void drawCalPlace() {
@@ -499,80 +635,82 @@ void drawCalPlace() {
                     waitingForCalibration ? "Calibrating..." : line,
                     waitingForCalibration ? "Keep weight still" : "Then press START");
   if (!waitingForCalibration)
-    drawButton(30, 210, 180, 54, "START", TFT_GREEN);
+    drawButton(30, 210, 180, 54, "START", COLOR_SUCCESS);
 }
 
 void drawCalDone() {
   drawSimpleMessage("CALIBRATION", "COMPLETE", "Calibration saved");
-  drawButton(50, 210, 140, 50, "DONE", TFT_BLUE);
+  drawButton(50, 210, 140, 50, "DONE", COLOR_PRIMARY);
 }
 
 void drawExitConfirm() {
   drawSimpleMessage("EXIT CALIBRATION", "Return to main menu?",
                     "The current load-cell operation may finish.");
-  drawButton(18, 210, 96, 54, "NO", TFT_DARKGREY);
-  drawButton(126, 210, 96, 54, "YES", TFT_RED);
+  drawButton(18, 210, 96, 54, "NO", COLOR_PANEL_LIGHT, true, COLOR_MUTED);
+  drawButton(126, 210, 96, 54, "YES", COLOR_DANGER);
 }
 
 // LINK status page: shows the connection state of each cell. A and B are the
 // real nodes; C and D are decorative (always offline) to match the dashboard.
 void drawLinkStatus() {
-  lcd.fillScreen(TFT_BLACK);
+  lcd.fillScreen(COLOR_BACKGROUND);
   drawHeader("LINK STATUS");
 
   const char* labels[4] = {"LOAD CELL A", "LOAD CELL B",
                            "LOAD CELL C", "LOAD CELL D"};
   for (uint8_t i = 0; i < 4; i++) {
     int y = 40 + i * 40;
-    lcd.drawRoundRect(6, y, 228, 34, 6, TFT_DARKGREY);
+    lcd.fillRoundRect(6, y, 228, 34, 6, COLOR_PANEL);
+    lcd.drawRoundRect(6, y, 228, 34, 6, COLOR_MUTED);
     lcd.setTextDatum(middle_left);
     lcd.setTextSize(1);
-    lcd.setTextColor(i < 2 ? TFT_WHITE : TFT_DARKGREY, TFT_BLACK);
+    lcd.setTextColor(i < 2 ? TFT_WHITE : COLOR_MUTED, COLOR_PANEL);
     lcd.drawString(labels[i], 14, y + 17);
 
     bool connected = (i < 2) && nodeConnected(i);
     lcd.setTextDatum(middle_right);
-    lcd.setTextColor(i < 2 ? (connected ? TFT_GREEN : TFT_RED) : TFT_DARKGREY,
-                     TFT_BLACK);
+    lcd.setTextColor(i < 2 ? (connected ? COLOR_SUCCESS : COLOR_DANGER)
+                           : COLOR_MUTED,
+                     COLOR_PANEL);
     lcd.drawString(i < 2 ? (connected ? "CONNECTED" : "OFFLINE") : "N/A",
                    226, y + 17);
   }
 
-  drawButton(65, 270, 110, 40, "HOME", TFT_DARKGREY);
+  drawButton(65, 270, 110, 40, "HOME", COLOR_PANEL_LIGHT, true, COLOR_MUTED);
 }
 
 void drawSettings() {
-  lcd.fillScreen(TFT_BLACK);
+  lcd.fillScreen(COLOR_BACKGROUND);
   drawHeader("SETTINGS");
 
   lcd.setTextDatum(middle_left);
-  lcd.setTextColor(TFT_WHITE, TFT_BLACK);
+  lcd.setTextColor(TFT_WHITE, COLOR_BACKGROUND);
   lcd.setTextSize(1);
 
   char line[48];
   snprintf(line, sizeof(line), "Lock above: %.1f kg", settingLockThresholdKg);
   lcd.drawString(line, 14, 58);
-  drawButton(136, 42, 46, 32, "-", TFT_BLUE);
-  drawButton(188, 42, 46, 32, "+", TFT_BLUE);
+  drawButton(136, 42, 46, 32, "-", COLOR_PRIMARY);
+  drawButton(188, 42, 46, 32, "+", COLOR_PRIMARY);
 
   snprintf(line, sizeof(line), "Auto-lock: %s", settingAutoLock ? "ON" : "OFF");
   lcd.drawString(line, 14, 110);
-  drawButton(150, 94, 84, 32, "TOGGLE", TFT_DARKGREEN);
+  drawButton(150, 94, 84, 32, "TOGGLE", COLOR_SUCCESS);
 
   snprintf(line, sizeof(line), "Brightness: %u%%", settingBrightnessPercent);
   lcd.drawString(line, 14, 162);
-  drawButton(136, 146, 46, 32, "-", TFT_BLUE);
-  drawButton(188, 146, 46, 32, "+", TFT_BLUE);
+  drawButton(136, 146, 46, 32, "-", COLOR_PRIMARY);
+  drawButton(188, 146, 46, 32, "+", COLOR_PRIMARY);
 
   snprintf(line, sizeof(line), "Decimals: %u", settingDecimals);
   lcd.drawString(line, 14, 214);
-  drawButton(150, 198, 84, 32, "TOGGLE", TFT_BLUE);
+  drawButton(150, 198, 84, 32, "TOGGLE", COLOR_PRIMARY);
 
-  lcd.setTextColor(TFT_CYAN, TFT_BLACK);
+  lcd.setTextColor(COLOR_PRIMARY, COLOR_BACKGROUND);
   lcd.drawString("Lock window: 1.0 kg for 4 seconds (fixed)", 14, 246);
 
-  drawButton(6, 270, 111, 40, "HOME", TFT_DARKGREY);
-  drawButton(123, 270, 111, 40, "SAVE", TFT_GREEN);
+  drawButton(6, 270, 111, 40, "HOME", COLOR_PANEL_LIGHT, true, COLOR_MUTED);
+  drawButton(123, 270, 111, 40, "SAVE", COLOR_SUCCESS);
 }
 
 void renderScreen() {
@@ -946,7 +1084,7 @@ void setup() {
   lcd.init();
   lcd.setRotation(0);
   setBacklightPercent(settingBrightnessPercent);
-  lcd.fillScreen(TFT_BLACK);
+  lcd.fillScreen(COLOR_BACKGROUND);
 
   setupTouch();
   setupEspNow();
@@ -966,5 +1104,6 @@ void loop() {
   }
 
   renderScreen();
+  serviceDashboardBorders();
   delay(10);
 }
