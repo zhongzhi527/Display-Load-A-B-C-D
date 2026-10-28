@@ -328,32 +328,14 @@ void drawButton(int x, int y, int w, int h, const char* label,
   lcd.drawString(label, x + w / 2, y + h / 2);
 }
 
-void updateHeaderIndicators(bool force = false) {
-  for (uint8_t i = 0; i < 2; i++) {
-    bool connected = nodeConnected(i);
-    if (!force && paintedHeaderValid &&
-        paintedHeaderConnected[i] == connected) {
-      continue;
-    }
-
-    int x = i == 0 ? 186 : 212;
-    lcd.fillRect(x, 3, 24, 22, COLOR_PANEL);
-    lcd.setTextDatum(middle_center);
-    lcd.setTextSize(1);
-    lcd.setTextColor(connected ? COLOR_SUCCESS : COLOR_DANGER, COLOR_PANEL);
-    lcd.drawString(i == 0 ? "A" : "B", x + 12, 14);
-    paintedHeaderConnected[i] = connected;
-  }
-  paintedHeaderValid = true;
-}
-
 void drawHeader(const char* title) {
   lcd.fillRect(0, 0, 240, 28, COLOR_PANEL);
   lcd.setTextDatum(middle_center);
   lcd.setTextColor(TFT_WHITE, COLOR_PANEL);
   lcd.setTextSize(2);
   lcd.drawString(title, 120, 14);
-  updateHeaderIndicators(true);
+  // No A/B connection letters on sub-page headers (CALIBRATE/SETTINGS/LINK/
+  // wizard) - they belong only on the dashboard, shown via the LINK button.
 }
 
 // Sample the battery pin and update the cached percentage. Ported from the
@@ -690,49 +672,104 @@ void serviceBatteryIndicator() {
   drawBatteryIndicator(COLOR_PANEL);
 }
 
-// Calibration cell-picker page (Display-Load-A-B style). Pick A or B, adjust
-// the known weight, tare the selected cell, or start the guided calibration.
-// Only the two real cells are selectable.
+// The four known-weight adjust buttons, matching the DUAL display's calibrate
+// page: -1 / -0.1 / +0.1 / +1 in a single row. Each entry's x/y/w/h is also
+// used verbatim as the touch hit-box in handleTouch(), so the drawn button and
+// its hit-box always agree. The DUAL row sits at y=194 under a 42px header;
+// the QUAD's header is 28px, so the whole body is shifted up 14px (y=180).
+struct CalAdjustButton {
+  int x;
+  int y;
+  int w;
+  int h;
+  float deltaKg;
+  const char* label;
+};
+constexpr CalAdjustButton CAL_ADJUST_BUTTONS[] = {
+  {4, 180, 55, 32, -1.0f, "-1"},
+  {63, 180, 55, 32, -0.1f, "-0.1"},
+  {122, 180, 55, 32, 0.1f, "+0.1"},
+  {181, 180, 55, 32, 1.0f, "+1"},
+};
+constexpr uint8_t CAL_ADJUST_BUTTON_COUNT =
+  sizeof(CAL_ADJUST_BUTTONS) / sizeof(CAL_ADJUST_BUTTONS[0]);
+
+// Calibration cell-picker page, rebuilt 1:1 from the DUAL display's calibrate
+// page (drawCalibrationPage / drawCalibrationDynamic). Top-to-bottom: a BACK
+// button in the header, two instruction lines, a KNOWN WEIGHT panel with the
+// big value, a LOAD CELL A / B selector, the four -1/-0.1/+0.1/+1 adjust
+// buttons, a full-width TARE button and a full-width CALIBRATE button. Because
+// the QUAD header is 28px (vs the DUAL's 42px) the body is shifted up 14px
+// while keeping the same visual order and proportions. Only the two real cells
+// A and B are selectable.
 void drawCalibrateStatic() {
   lcd.fillScreen(COLOR_BACKGROUND);
   drawHeader("CALIBRATE");
 
-  // Cell selector (A / B). The selected cell is highlighted.
-  lcd.setTextDatum(top_left);
-  lcd.setTextSize(1);
-  lcd.setTextColor(TFT_WHITE, COLOR_BACKGROUND);
-  lcd.drawString("SELECT CELL", 14, 36);
-  drawButton(6, 50, 111, 42, "CELL A",
-             selectedNode == 0 ? COLOR_SUCCESS : COLOR_PANEL_LIGHT, true,
-             selectedNode == 0 ? 0 : COLOR_MUTED);
-  drawButton(123, 50, 111, 42, "CELL B",
-             selectedNode == 1 ? COLOR_SUCCESS : COLOR_PANEL_LIGHT, true,
-             selectedNode == 1 ? 0 : COLOR_MUTED);
+  // BACK button at the top-left of the header (DUAL has one at (5,7,55,28) in
+  // its 42px header; the QUAD's 28px header is tighter, so use a small button).
+  drawButton(4, 2, 48, 24, "BACK", COLOR_PANEL_LIGHT, true, COLOR_MUTED);
 
-  // Known weight with +/- adjust.
+  // Two instruction lines (COLOR_MUTED, size 1) on the screen background. DUAL
+  // draws these at y=50 and y=65; shifted up 14px to y=36 and y=51.
   lcd.setTextDatum(top_left);
   lcd.setTextSize(1);
-  lcd.setTextColor(TFT_WHITE, COLOR_BACKGROUND);
-  lcd.drawString("KNOWN WEIGHT", 14, 104);
+  lcd.setTextColor(COLOR_MUTED, COLOR_BACKGROUND);
+  lcd.drawString("1. Select a scale and tare it empty", 8, 36);
+  lcd.drawString("2. Load selected cell only, then CAL", 8, 51);
+
+  // KNOWN WEIGHT panel: a filled COLOR_PANEL rounded panel with the caption at
+  // its top-left and the big value centred below. DUAL panel is (6,84,228,72);
+  // shifted up 14px to (6,70,228,72). Caption DUAL y=94 -> y=80, value DUAL
+  // y=130 -> y=116.
+  lcd.fillRoundRect(6, 70, 228, 72, 9, COLOR_PANEL);
+  lcd.setTextDatum(top_left);
+  lcd.setTextSize(1);
+  lcd.setTextColor(COLOR_MUTED, COLOR_PANEL);
+  char caption[32];
+  snprintf(caption, sizeof(caption), "KNOWN WEIGHT - LOAD CELL %c",
+           selectedNode == 0 ? 'A' : 'B');
+  lcd.drawString(caption, 16, 80);
 
   char text[20];
   snprintf(text, sizeof(text), "%.1f kg", calibrationWeightKg);
   lcd.setTextDatum(middle_center);
-  lcd.setTextColor(COLOR_WARNING, COLOR_BACKGROUND);
+  lcd.setTextColor(TFT_WHITE, COLOR_PANEL);
   lcd.setTextSize(3);
-  lcd.drawString(text, 120, 153);
+  lcd.drawString(text, 120, 116);
 
-  drawButton(6, 132, 60, 42, "-", COLOR_PRIMARY);
-  drawButton(174, 132, 60, 42, "+", COLOR_PRIMARY);
+  // LOAD CELL A / B selector (two 111-wide buttons). The selected one is
+  // highlighted (COLOR_PRIMARY fill); the other is COLOR_PANEL_LIGHT / muted.
+  // DUAL row is y=158; shifted up 14px to y=144.
+  drawButton(6, 144, 111, 30, "LOAD CELL A",
+             selectedNode == 0 ? COLOR_PRIMARY : COLOR_PANEL_LIGHT, true,
+             selectedNode == 0 ? 0 : COLOR_MUTED);
+  drawButton(123, 144, 111, 30, "LOAD CELL B",
+             selectedNode == 1 ? COLOR_PRIMARY : COLOR_PANEL_LIGHT, true,
+             selectedNode == 1 ? 0 : COLOR_MUTED);
 
-  // Per-cell actions.
+  // Four adjust buttons (-1 / -0.1 / +0.1 / +1). Drawn from the shared table so
+  // their positions match the hit-boxes in handleTouch() exactly.
+  for (uint8_t i = 0; i < CAL_ADJUST_BUTTON_COUNT; i++) {
+    const CalAdjustButton& b = CAL_ADJUST_BUTTONS[i];
+    drawButton(b.x, b.y, b.w, b.h, b.label, COLOR_PANEL_LIGHT, true,
+               COLOR_MUTED);
+  }
+
+  // Full-width TARE and CALIBRATE buttons for the selected cell. DUAL rows are
+  // y=232 (h=36) and y=276 (h=37); shifted up 14px to y=218 and y=262.
+  char tareLabel[24];
+  snprintf(tareLabel, sizeof(tareLabel), "TARE LOAD CELL %c",
+           selectedNode == 0 ? 'A' : 'B');
+  char calLabel[28];
+  snprintf(calLabel, sizeof(calLabel), "CALIBRATE LOAD CELL %c",
+           selectedNode == 0 ? 'A' : 'B');
   bool connected = nodeConnected(selectedNode);
-  drawButton(6, 196, 111, 42, "TARE", COLOR_PRIMARY, connected);
-  drawButton(123, 196, 111, 42, "CALIBRATE", COLOR_PANEL_LIGHT, connected,
-             COLOR_WARNING);
+  drawButton(6, 218, 228, 36, tareLabel, COLOR_PANEL_LIGHT, connected,
+             COLOR_PRIMARY);
+  drawButton(6, 262, 228, 37, calLabel, COLOR_PRIMARY, connected,
+             COLOR_PRIMARY);
 
-  // Navigation.
-  drawButton(65, 254, 110, 40, "HOME", COLOR_PANEL_LIGHT, true, COLOR_MUTED);
   resetPaintCache();
 }
 
@@ -1177,28 +1214,52 @@ void handleTouch() {
   }
 
   if (screen == SCREEN_CALIBRATE) {
-    if (inside(x, y, 6, 50, 111, 42)) {
+    // BACK button in the header -> return to the dashboard.
+    if (inside(x, y, 4, 2, 48, 24)) {
+      changeScreen(SCREEN_MAIN);
+      return;
+    }
+
+    // LOAD CELL A / B selector (hit-boxes match the drawCalibrateStatic()
+    // selector buttons).
+    if (inside(x, y, 6, 144, 111, 30)) {
       selectedNode = 0;
       staticScreenRequired = true;
-    } else if (inside(x, y, 123, 50, 111, 42)) {
+      return;
+    }
+    if (inside(x, y, 123, 144, 111, 30)) {
       selectedNode = 1;
       staticScreenRequired = true;
-    } else if (inside(x, y, 6, 132, 60, 42)) {
-      calibrationWeightKg = max(0.1f, calibrationWeightKg - 0.1f);
-      staticScreenRequired = true;
-    } else if (inside(x, y, 174, 132, 60, 42)) {
-      calibrationWeightKg = min(100.0f, calibrationWeightKg + 0.1f);
-      staticScreenRequired = true;
-    } else if (inside(x, y, 6, 196, 111, 42) &&
-               nodeConnected(selectedNode)) {
-      // Individual TARE: tare only the selected cell.
+      return;
+    }
+
+    // Four adjust buttons (-1 / -0.1 / +0.1 / +1). Each entry's rect is used as
+    // both the drawn button and its hit-box, so they always agree. A tap
+    // applies the button's delta, clamped to [0.1, 100.0] and rounded to one
+    // decimal, then redraws the page.
+    for (uint8_t i = 0; i < CAL_ADJUST_BUTTON_COUNT; i++) {
+      const CalAdjustButton& b = CAL_ADJUST_BUTTONS[i];
+      if (inside(x, y, b.x, b.y, b.w, b.h)) {
+        float next = calibrationWeightKg + b.deltaKg;
+        next = roundf(next * 10.0f) / 10.0f;
+        calibrationWeightKg = constrain(next, 0.1f, 100.0f);
+        staticScreenRequired = true;
+        return;
+      }
+    }
+
+    // Full-width TARE: tare only the selected cell.
+    if (inside(x, y, 6, 218, 228, 36) && nodeConnected(selectedNode)) {
       sendCommand(selectedNode, COMMAND_TARE);
-    } else if (inside(x, y, 123, 196, 111, 42) &&
-               nodeConnected(selectedNode)) {
-      // Enter the guided calibration wizard for the selected cell.
+      return;
+    }
+
+    // Full-width CALIBRATE: enter the guided calibration wizard for the
+    // selected cell (preserves the QUAD's existing SCREEN_CAL_WEIGHT flow and
+    // the onDataReceived handshake).
+    if (inside(x, y, 6, 262, 228, 37) && nodeConnected(selectedNode)) {
       changeScreen(SCREEN_CAL_WEIGHT);
-    } else if (inside(x, y, 65, 254, 110, 40)) {
-      changeScreen(SCREEN_MAIN);
+      return;
     }
     return;
   }
