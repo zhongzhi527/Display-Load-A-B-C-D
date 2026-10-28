@@ -29,6 +29,13 @@ constexpr unsigned long TOUCH_DEBOUNCE_MS = 220;
 constexpr unsigned long BUTTON_DEBOUNCE_MS = 40;
 constexpr unsigned long BUTTON_LONG_PRESS_MS = 2000;
 
+// Idle-sleep (SNOOZE) timing, ported 1:1 from the DUAL display. After
+// SCREEN_TIMEOUT_MS with no touch the screen sleeps (LCD + backlight off, touch
+// stays awake); the last SCREEN_IDLE_WARNING_MS show a SNOOZING warning with a
+// live countdown that any touch cancels.
+constexpr unsigned long SCREEN_TIMEOUT_MS = 300000;      // 5 min
+constexpr unsigned long SCREEN_IDLE_WARNING_MS = 3000;   // last 3 s
+
 // Shared colour palette (RGB565), matching the Display-Load-A-B (DUAL SCALE)
 // firmware: a dark navy screen with slate panels and palette-tinted text.
 constexpr uint16_t COLOR_BACKGROUND  = 0x0083;  // dark navy screen bg
@@ -158,6 +165,16 @@ uint8_t settingDecimals = 3;
 
 unsigned long lastTouchMs = 0;
 unsigned long doneUntilMs = 0;
+
+// Idle-sleep (SNOOZE) state, mirroring the DUAL display. screenSleeping is true
+// while the LCD + backlight are off; idleWarningActive is true while the last
+// few seconds show the SNOOZING warning; idleWarningSecondsShown holds the
+// second currently drawn so the countdown only repaints when it changes;
+// lastUserActivityMs is the millis() of the most recent touch / button press.
+bool screenSleeping = false;
+bool idleWarningActive = false;
+uint8_t idleWarningSecondsShown = 0;
+unsigned long lastUserActivityMs = 0;
 
 bool buttonLastReading = HIGH;
 bool buttonStableState = HIGH;
@@ -1228,6 +1245,14 @@ void handleTopButton() {
     if (buttonStableState == LOW) {
       buttonPressedMs = now;
       buttonLongHandled = false;
+      lastUserActivityMs = now;
+      // The physical button also counts as activity. A press detected while
+      // the screen is asleep wakes it and is consumed (not acted on).
+      if (screenSleeping) {
+        setScreenSleeping(false);
+        Serial.println("Screen standby ended by top button.");
+        return;
+      }
       registerActivity();
     } else {
       unsigned long held = now - buttonPressedMs;
@@ -1260,6 +1285,25 @@ void saveDisplaySettings() {
 void handleTouch() {
   uint16_t x, y;
   if (!readTouch(x, y)) return;
+
+  // Any touch counts as user activity. Mirror the DUAL display's loop: a touch
+  // while the screen is asleep wakes it (and is NOT acted on as a button), and
+  // a touch while the SNOOZING warning is up cancels it (also not a button).
+  lastUserActivityMs = millis();
+
+  if (screenSleeping) {
+    setScreenSleeping(false);
+    Serial.println("Screen standby ended by touchscreen activity.");
+    return;
+  }
+
+  if (idleWarningActive) {
+    idleWarningActive = false;
+    idleWarningSecondsShown = 0;
+    staticScreenRequired = true;
+    Serial.println("Idle standby cancelled by touchscreen activity.");
+    return;
+  }
 
   unsigned long now = millis();
   if (now - lastTouchMs < TOUCH_DEBOUNCE_MS) return;
@@ -1453,6 +1497,94 @@ void setupTouch() {
   Wire.setClock(400000);
 }
 
+// Redraw just the countdown line of the SNOOZING warning. Clears the strip
+// first, then draws "Screen off in N sec" centered. Ported 1:1 from the DUAL
+// display's drawIdleWarningCountdown() (same text, position, size and colour).
+void drawIdleWarningCountdown(uint8_t secondsRemaining) {
+  lcd.fillRect(20, 174, 200, 20, COLOR_BACKGROUND);
+  char text[32];
+  snprintf(text, sizeof(text), "Screen off in %u sec", secondsRemaining);
+  lcd.setTextDatum(middle_center);
+  lcd.setTextColor(COLOR_WARNING, COLOR_BACKGROUND);
+  lcd.setTextSize(1);
+  lcd.drawString(text, 120, 184);
+  lcd.setTextDatum(top_left);
+}
+
+// Draw the full SNOOZING idle-standby warning screen. Ported 1:1 from the DUAL
+// display's drawIdleWarning(): clears to the background, then the SNOOZING
+// title, the explanation line, the live countdown and the "stay awake" prompt,
+// all centered at x=120. Coordinates/sizes/strings match the DUAL exactly.
+void drawIdleWarning(uint8_t secondsRemaining) {
+  lcd.fillScreen(COLOR_BACKGROUND);
+
+  lcd.setTextDatum(middle_center);
+  lcd.setTextColor(TFT_WHITE, COLOR_BACKGROUND);
+  lcd.setTextSize(3);
+  lcd.drawString("SNOOZING", 120, 116);
+
+  lcd.setTextColor(COLOR_MUTED, COLOR_BACKGROUND);
+  lcd.setTextSize(1);
+  lcd.drawString("No recent touchscreen activity", 120, 158);
+
+  drawIdleWarningCountdown(secondsRemaining);
+
+  lcd.setTextDatum(middle_center);
+  lcd.setTextColor(TFT_WHITE, COLOR_BACKGROUND);
+  lcd.setTextSize(1);
+  lcd.drawString("Touch screen to stay awake", 120, 210);
+
+  lcd.setTextDatum(top_left);
+}
+
+// Sleep or wake the screen. Ported 1:1 from the DUAL display's
+// setScreenSleeping(): idempotent, clears any active idle warning, and on sleep
+// powers the LCD + backlight off (touch stays awake). The LovyanGFX equivalent
+// of the DUAL's tft.writecommand(TFT_DISPOFF)+TFT_SLPIN / TFT_SLPOUT+TFT_DISPON
+// is lcd.sleep() / lcd.wakeup(). On wake the panel is woken, touch is re-inited
+// (setupTouch() re-runs the CST820 reset), and a full frame is redrawn while
+// the backlight is still off, then revealed in one step so no stale frame is
+// exposed.
+void setScreenSleeping(bool sleeping) {
+  if (screenSleeping == sleeping) {
+    return;
+  }
+
+  idleWarningActive = false;
+  idleWarningSecondsShown = 0;
+
+  if (sleeping) {
+    Serial.println("Screen standby: LCD and backlight off; touch stays awake.");
+    screenSleeping = true;
+    // Reset the touch edge-tracking debounce so the waking touch is treated as
+    // a fresh press, not a continuation of an earlier one.
+    lastTouchMs = 0;
+
+    lcd.sleep();
+    delay(20);
+    delay(120);
+    setBacklightPercent(0);
+    return;
+  }
+
+  Serial.println("Screen standby ended.");
+  lcd.wakeup();
+  delay(120);
+
+  // Re-init touch on wake (re-runs the CST820 reset), matching how the DUAL
+  // re-inits its touch controller when leaving standby.
+  setupTouch();
+
+  screenSleeping = false;
+  lastUserActivityMs = millis();
+
+  // Restore a complete frame while the backlight is still dark, then reveal it
+  // in one step so wake-up never exposes stale framebuffer contents.
+  staticScreenRequired = true;
+  renderScreen();
+  setBacklightPercent(settingBrightnessPercent);
+}
+
 void setup() {
   Serial.begin(115200);
   pinMode(TOP_BUTTON_PIN, INPUT_PULLUP);
@@ -1492,8 +1624,45 @@ void loop() {
   }
 
   updateBatteryReading();
-  renderScreen();
-  serviceDashboardBorders();
-  serviceBatteryIndicator();
+
+  // Idle-sleep (SNOOZE) servicing, mirroring the DUAL display's loop. When the
+  // screen is awake, measure how long since the last touch / button press: once
+  // the full timeout elapses, sleep; in the final SCREEN_IDLE_WARNING_MS show
+  // the SNOOZING warning with a per-second countdown (only repainting when the
+  // second changes; first entry draws the full warning, later ticks just the
+  // countdown line).
+  if (!screenSleeping) {
+    const unsigned long idleTimeMs = millis() - lastUserActivityMs;
+    if (idleTimeMs >= SCREEN_TIMEOUT_MS) {
+      setScreenSleeping(true);
+    } else if (idleTimeMs >= SCREEN_TIMEOUT_MS - SCREEN_IDLE_WARNING_MS) {
+      const unsigned long remainingMs = SCREEN_TIMEOUT_MS - idleTimeMs;
+      const uint8_t secondsRemaining =
+          static_cast<uint8_t>((remainingMs + 999) / 1000);
+      if (!idleWarningActive ||
+          secondsRemaining != idleWarningSecondsShown) {
+        const bool enteringIdleWarning = !idleWarningActive;
+        if (enteringIdleWarning) {
+          Serial.println("Screen idle: showing standby warning.");
+        }
+        idleWarningActive = true;
+        idleWarningSecondsShown = secondsRemaining;
+        if (enteringIdleWarning) {
+          drawIdleWarning(secondsRemaining);
+        } else {
+          drawIdleWarningCountdown(secondsRemaining);
+        }
+      }
+    }
+  }
+
+  // While asleep or showing the warning, do not paint the normal UI over the
+  // blank/warning screen.
+  if (!screenSleeping && !idleWarningActive) {
+    renderScreen();
+    serviceDashboardBorders();
+    serviceBatteryIndicator();
+  }
+
   delay(10);
 }
