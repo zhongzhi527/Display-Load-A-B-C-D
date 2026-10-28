@@ -1228,6 +1228,10 @@ void requestHome() {
   }
 }
 
+// Forward declaration: defined further down with the other idle-sleep
+// helpers, but called from handleTopButton()/handleTouch() above it.
+void setScreenSleeping(bool sleeping);
+
 void handleTopButton() {
   bool reading = digitalRead(TOP_BUTTON_PIN);
   unsigned long now = millis();
