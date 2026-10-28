@@ -353,6 +353,19 @@ void drawButton(int x, int y, int w, int h, const char* label,
   lcd.drawString(label, x + w / 2, y + h / 2);
 }
 
+// Brief tap feedback for a button: paint it in a bright highlight colour for a
+// moment, then restore its normal look. Used by the calibration-wizard
+// sub-pages (choose-weight, remove-weight, place-weight, done) so a press is
+// clearly visible instead of every button staying the same colour. The main
+// calibrate page already flashes its own buttons inline; this gives the wizard
+// buttons the same feel.
+void flashButton(int x, int y, int w, int h, const char* label,
+                 uint32_t normalColor, uint16_t normalBorder = 0) {
+  drawButton(x, y, w, h, label, COLOR_WARNING, true, COLOR_WARNING);
+  delay(90);
+  drawButton(x, y, w, h, label, normalColor, true, normalBorder);
+}
+
 void drawHeader(const char* title) {
   lcd.fillRect(0, 0, 240, 28, COLOR_PANEL);
   lcd.setTextDatum(middle_center);
@@ -1415,12 +1428,15 @@ void handleTouch() {
 
   if (screen == SCREEN_CAL_WEIGHT) {
     if (inside(x, y, 6, 230, 68, 54)) {
+      flashButton(6, 230, 68, 54, "-", COLOR_PRIMARY);
       calibrationWeightKg = max(0.1f, calibrationWeightKg - 0.1f);
       staticScreenRequired = true;
     } else if (inside(x, y, 86, 230, 68, 54)) {
+      flashButton(86, 230, 68, 54, "+", COLOR_PRIMARY);
       calibrationWeightKg = min(100.0f, calibrationWeightKg + 0.1f);
       staticScreenRequired = true;
     } else if (inside(x, y, 166, 230, 68, 54)) {
+      flashButton(166, 230, 68, 54, "NEXT", COLOR_SUCCESS);
       changeScreen(SCREEN_CAL_REMOVE);
     }
     return;
@@ -1428,6 +1444,7 @@ void handleTouch() {
 
   if (screen == SCREEN_CAL_REMOVE && !waitingForTare &&
       inside(x, y, 30, 210, 180, 54)) {
+    flashButton(30, 210, 180, 54, "TARE", COLOR_PRIMARY);
     waitingForTare = true;
     sendCommand(selectedNode, COMMAND_TARE);
     staticScreenRequired = true;
@@ -1436,6 +1453,7 @@ void handleTouch() {
 
   if (screen == SCREEN_CAL_PLACE && !waitingForCalibration &&
       inside(x, y, 30, 210, 180, 54)) {
+    flashButton(30, 210, 180, 54, "START", COLOR_SUCCESS);
     waitingForCalibration = true;
     sendCommand(selectedNode, COMMAND_CALIBRATE, calibrationWeightKg);
     staticScreenRequired = true;
@@ -1444,6 +1462,7 @@ void handleTouch() {
 
   if (screen == SCREEN_CAL_DONE &&
       inside(x, y, 50, 210, 140, 50)) {
+    flashButton(50, 210, 140, 50, "DONE", COLOR_PRIMARY);
     changeScreen(SCREEN_MAIN);
     return;
   }
