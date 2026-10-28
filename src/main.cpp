@@ -46,6 +46,21 @@ constexpr uint32_t BLINK_ATTENTION_MS = 900;
 constexpr uint32_t BLINK_ERROR_MS = 800;
 constexpr unsigned long BORDER_SERVICE_MS = 50;
 
+// Battery sensing, ported from the Display-Load-A-B (DUAL SCALE) firmware. The
+// single-cell LiPo is fed through an on-board divider to GPIO39 (input-only
+// ADC); BATTERY_DIVIDER_RATIO converts the pin voltage back to the pack
+// voltage. ~4.2 V full, ~3.3 V flat; ~3.45 V (~15%) raises the low warning.
+constexpr int BATTERY_SENSE_PIN = 39;
+constexpr float BATTERY_DIVIDER_RATIO = 1.5f;
+constexpr float BATTERY_FULL_VOLTS = 4.20f;
+constexpr float BATTERY_EMPTY_VOLTS = 3.30f;
+constexpr float BATTERY_LOW_VOLTS = 3.45f;
+constexpr uint32_t BATTERY_SAMPLE_INTERVAL_MS = 2000;
+constexpr uint8_t BATTERY_SAMPLE_AVERAGE_COUNT = 16;
+// Time smoothing so the gauge does not jitter: each refresh eases this
+// fraction of the way toward the newest raw reading (smaller = steadier).
+constexpr float BATTERY_SMOOTHING_FACTOR = 0.15f;
+
 // MAC addresses of the two load-cell nodes (A and B).
 uint8_t nodeMac[2][6] = {
   {0xE0, 0xE2, 0xE6, 0xD7, 0x3E, 0xD4}, // A
@@ -150,6 +165,17 @@ bool paintedConnected[2] = {false, false};
 bool paintedLocked[2] = {false, false};
 bool paintedHeaderConnected[2] = {false, false};
 bool paintedHeaderValid = false;
+
+// Battery state, refreshed roughly every BATTERY_SAMPLE_INTERVAL_MS. Mirrors
+// the DUAL display: a smoothed pack voltage drives a 0-100% estimate.
+float batteryVolts = 0.0f;            // smoothed pack voltage (displayed basis)
+float batterySmoothedPercent = -1.0f; // smoothed %, -1 until first sample
+uint8_t batteryPercent = 0;           // integer % actually shown
+bool batteryReadingValid = false;
+bool batteryLow = false;
+uint32_t lastBatterySampleMs = 0;
+int16_t batteryDrawnPercent = -1;     // -1 forces a first draw
+bool batteryDrawnLow = false;
 
 // Last border colour drawn for each real cell panel (A=0, B=1). Sentinel
 // 0xFFFF forces a redraw on the next service pass. Used by
@@ -330,9 +356,113 @@ void drawHeader(const char* title) {
   updateHeaderIndicators(true);
 }
 
+// Sample the battery pin and update the cached percentage. Ported from the
+// DUAL display: the raw reading is averaged across ADC samples and smoothed
+// across time (EMA) so the gauge holds steady and climbs gently when charging.
+void updateBatteryReading(bool force = false) {
+  const uint32_t now = millis();
+  if (!force && lastBatterySampleMs != 0 &&
+      now - lastBatterySampleMs < BATTERY_SAMPLE_INTERVAL_MS) {
+    return;
+  }
+  lastBatterySampleMs = now;
+
+  uint32_t rawSum = 0;
+  for (uint8_t i = 0; i < BATTERY_SAMPLE_AVERAGE_COUNT; ++i) {
+    rawSum += analogRead(BATTERY_SENSE_PIN);
+  }
+  const float rawAverage =
+      static_cast<float>(rawSum) / BATTERY_SAMPLE_AVERAGE_COUNT;
+
+  // ESP32 ADC: ~0..4095 over ~0..3.3 V at 11 dB attenuation.
+  const float pinVolts = (rawAverage / 4095.0f) * 3.3f;
+  const float packVolts = pinVolts * BATTERY_DIVIDER_RATIO;
+
+  // A plausible pack sits above ~2.5 V at the pin; far below means the sense
+  // line is not reading a battery (e.g. bench power), so flag invalid.
+  const bool valid = packVolts > 2.5f;
+  batteryReadingValid = valid;
+  if (!valid) {
+    return;
+  }
+
+  // Smooth the pack voltage over time so the reading does not jitter.
+  if (batteryVolts <= 0.0f) {
+    batteryVolts = packVolts;  // first valid sample seeds the filter
+  } else {
+    batteryVolts += (packVolts - batteryVolts) * BATTERY_SMOOTHING_FACTOR;
+  }
+
+  // Map the smoothed voltage to a percentage from the LiPo curve.
+  float targetPercent =
+      (batteryVolts - BATTERY_EMPTY_VOLTS) /
+      (BATTERY_FULL_VOLTS - BATTERY_EMPTY_VOLTS) * 100.0f;
+  targetPercent = constrain(targetPercent, 0.0f, 100.0f);
+  batterySmoothedPercent = targetPercent;
+
+  batteryPercent = static_cast<uint8_t>(batterySmoothedPercent + 0.5f);
+  batteryLow = batteryVolts <= BATTERY_LOW_VOLTS;
+}
+
+// Compact battery glyph + "NN%" at the far right of the dashboard header
+// (0..28 tall). The body sits at x=176 so it clears the SET button, with the
+// percentage text to its right. Green >=50%, amber below, red when low; an
+// outlined "--" is shown while the reading is not yet valid. `background` is
+// the header fill so the glyph clears cleanly on an incremental redraw.
+void drawBatteryIndicator(uint16_t background) {
+  // Keep the change-tracker in sync so the loop's incremental redraw does not
+  // immediately repaint after a full-page draw.
+  batteryDrawnPercent =
+      batteryReadingValid ? static_cast<int16_t>(batteryPercent) : -1;
+  batteryDrawnLow = batteryLow;
+
+  constexpr int ICON_X = 176;  // battery body left edge
+  constexpr int ICON_Y = 7;
+  constexpr int ICON_W = 22;
+  constexpr int ICON_H = 15;
+  constexpr int TEXT_X = ICON_X + ICON_W + 3;  // 201 -> "%" text anchor
+
+  // Clear the indicator region (icon + nub + percentage text).
+  lcd.fillRect(ICON_X - 2, 2, 240 - (ICON_X - 2), 24, background);
+
+  lcd.setTextDatum(middle_left);
+  lcd.setTextSize(1);
+
+  if (!batteryReadingValid) {
+    // Unknown: draw an empty outline with a dash.
+    lcd.drawRect(ICON_X, ICON_Y, ICON_W, ICON_H, COLOR_MUTED);
+    lcd.fillRect(ICON_X + ICON_W, ICON_Y + 4, 3, 7, COLOR_MUTED);
+    lcd.setTextColor(COLOR_MUTED, background);
+    lcd.drawString("--", TEXT_X, 14);
+    return;
+  }
+
+  const uint16_t color =
+      batteryLow ? COLOR_DANGER
+                 : (batteryPercent >= 50 ? COLOR_SUCCESS : COLOR_WARNING);
+
+  // Battery outline + positive terminal nub.
+  lcd.drawRect(ICON_X, ICON_Y, ICON_W, ICON_H, color);
+  lcd.fillRect(ICON_X + ICON_W, ICON_Y + 4, 3, 7, color);
+
+  // Fill proportional to charge.
+  const int innerW = ICON_W - 4;
+  const int fillW = (innerW * batteryPercent) / 100;
+  if (fillW > 0) {
+    lcd.fillRect(ICON_X + 2, ICON_Y + 2, fillW, ICON_H - 4, color);
+  }
+
+  // Percentage text to the right of the icon.
+  char label[8];
+  snprintf(label, sizeof(label), "%u%%", batteryPercent);
+  lcd.setTextColor(color, background);
+  lcd.drawString(label, TEXT_X, 14);
+}
+
 // Dashboard header in the Display-Load-A-B style: the "QUAD SCALE" title on the
-// left, then LINK and SET buttons on the right. LINK opens the link-status
-// page; SET opens settings. The A/B connection dots are shown under LINK.
+// left, then LINK and SET buttons, then a battery indicator at the far right.
+// LINK opens the link-status page; SET opens settings. LINK and SET are shifted
+// left (from the old x=96/x=166) to free the top-right corner for the battery.
 void drawDashboardHeader() {
   lcd.fillRect(0, 0, 240, 28, COLOR_PANEL);
   lcd.setTextDatum(middle_left);
@@ -340,14 +470,19 @@ void drawDashboardHeader() {
   lcd.setTextSize(1);
   lcd.drawString("QUAD SCALE", 8, 14);
 
-  // LINK button (border coloured by overall connection) and SET button.
+  // LINK button (border coloured by overall connection) and SET button, both
+  // shifted left to make room for the battery indicator at the far right.
   const uint32_t linkColor =
       (nodeConnected(0) && nodeConnected(1)) ? COLOR_SUCCESS
       : (nodeConnected(0) || nodeConnected(1)) ? COLOR_WARNING
                                                : COLOR_DANGER;
-  drawButton(96, 2, 64, 24, "LINK", COLOR_PRIMARY);
-  lcd.drawRoundRect(96, 2, 64, 24, 7, linkColor);
-  drawButton(166, 2, 66, 24, "SET", COLOR_PANEL_LIGHT, true, COLOR_MUTED);
+  drawButton(70, 2, 52, 24, "LINK", COLOR_PRIMARY);
+  lcd.drawRoundRect(70, 2, 52, 24, 7, linkColor);
+  drawButton(126, 2, 44, 24, "SET", COLOR_PANEL_LIGHT, true, COLOR_MUTED);
+
+  // Battery indicator at the top-right of the header.
+  drawBatteryIndicator(COLOR_PANEL);
+
   paintedHeaderConnected[0] = nodeConnected(0);
   paintedHeaderConnected[1] = nodeConnected(1);
   paintedHeaderValid = true;
@@ -365,7 +500,7 @@ void updateDashboardLink() {
   }
   const uint32_t linkColor =
       (a && b) ? COLOR_SUCCESS : (a || b) ? COLOR_WARNING : COLOR_DANGER;
-  lcd.drawRoundRect(96, 2, 64, 24, 7, linkColor);
+  lcd.drawRoundRect(70, 2, 52, 24, 7, linkColor);
   paintedHeaderConnected[0] = a;
   paintedHeaderConnected[1] = b;
   paintedHeaderValid = true;
@@ -544,6 +679,17 @@ void serviceDashboardBorders() {
   }
 }
 
+// Redraw the dashboard battery indicator only when the shown percent or the
+// low-state changes, and only on the main screen (mirrors the DUAL display's
+// batteryDrawnPercent tracking). The glyph is drawn over the header fill.
+void serviceBatteryIndicator() {
+  if (screen != SCREEN_MAIN) return;
+  const int16_t shown =
+      batteryReadingValid ? static_cast<int16_t>(batteryPercent) : -1;
+  if (shown == batteryDrawnPercent && batteryLow == batteryDrawnLow) return;
+  drawBatteryIndicator(COLOR_PANEL);
+}
+
 // Calibration cell-picker page (Display-Load-A-B style). Pick A or B, adjust
 // the known weight, tare the selected cell, or start the guided calibration.
 // Only the two real cells are selectable.
@@ -650,65 +796,134 @@ void drawExitConfirm() {
   drawButton(126, 210, 96, 54, "YES", COLOR_DANGER);
 }
 
-// LINK status page: shows the connection state of each cell. A and B are the
-// real nodes; C and D are decorative (always offline) to match the dashboard.
+// One label/value pair inside a LINK STATUS panel (Display-Load-A-B style): a
+// small muted caption with the coloured value centred just below it. `centerX`
+// is the panel's horizontal centre; `labelY` the caption baseline-top.
+void drawLinkItem(int centerX, int labelY, const char* label,
+                  const char* value, uint16_t valueColor) {
+  lcd.setTextDatum(middle_center);
+  lcd.setTextSize(1);
+  lcd.setTextColor(COLOR_MUTED, COLOR_PANEL);
+  lcd.drawString(label, centerX, labelY);
+  lcd.setTextColor(valueColor, COLOR_PANEL);
+  lcd.drawString(value, centerX, labelY + 15);
+}
+
+// Draw one real-cell panel (A=0, B=1) in the DUAL connectivity style: a filled
+// COLOR_PANEL panel titled "LOAD CELL x" with LINK / STATUS / DATA AGE rows.
+void drawLinkCellPanel(uint8_t i, int px, int centerX) {
+  constexpr int PANEL_Y = 34;
+  constexpr int PANEL_W = 111;
+  constexpr int PANEL_H = 214;
+  lcd.fillRoundRect(px, PANEL_Y, PANEL_W, PANEL_H, 9, COLOR_PANEL);
+
+  lcd.setTextDatum(middle_center);
+  lcd.setTextSize(1);
+  lcd.setTextColor(TFT_WHITE, COLOR_PANEL);
+  lcd.drawString(i == 0 ? "LOAD CELL A" : "LOAD CELL B", centerX, PANEL_Y + 16);
+  lcd.drawFastHLine(px + 8, PANEL_Y + 28, PANEL_W - 16, COLOR_PANEL_LIGHT);
+
+  bool connected = nodeConnected(i);
+
+  // LINK row.
+  drawLinkItem(centerX, PANEL_Y + 48, "LINK",
+               connected ? "CONNECTED" : "OFFLINE",
+               connected ? COLOR_SUCCESS : COLOR_DANGER);
+
+  // STATUS row (the node's live status text).
+  drawLinkItem(centerX, PANEL_Y + 96, "STATUS", statusText(i),
+               statusColor(i));
+
+  // DATA AGE row: seconds since the last packet, green if fresh.
+  char age[16];
+  uint16_t ageColor;
+  if (nodes[i].lastPacketMs == 0) {
+    snprintf(age, sizeof(age), "--");
+    ageColor = COLOR_DANGER;
+  } else {
+    float seconds = (millis() - nodes[i].lastPacketMs) / 1000.0f;
+    if (seconds > 999.0f) seconds = 999.0f;
+    snprintf(age, sizeof(age), "%.1f s", seconds);
+    ageColor = (seconds < 2.5f) ? COLOR_SUCCESS : COLOR_DANGER;
+  }
+  drawLinkItem(centerX, PANEL_Y + 144, "DATA AGE", age, ageColor);
+}
+
+// LINK status page in the Display-Load-A-B connectivity style. The two real
+// nodes A and B each get a filled panel with LINK / STATUS / DATA AGE rows;
+// the decorative C and D cells are shown as a muted "N/A (demo)" strip.
 void drawLinkStatus() {
   lcd.fillScreen(COLOR_BACKGROUND);
   drawHeader("LINK STATUS");
 
-  const char* labels[4] = {"LOAD CELL A", "LOAD CELL B",
-                           "LOAD CELL C", "LOAD CELL D"};
-  for (uint8_t i = 0; i < 4; i++) {
-    int y = 40 + i * 40;
-    lcd.fillRoundRect(6, y, 228, 34, 6, COLOR_PANEL);
-    lcd.drawRoundRect(6, y, 228, 34, 6, COLOR_MUTED);
-    lcd.setTextDatum(middle_left);
-    lcd.setTextSize(1);
-    lcd.setTextColor(i < 2 ? TFT_WHITE : COLOR_MUTED, COLOR_PANEL);
-    lcd.drawString(labels[i], 14, y + 17);
+  drawLinkCellPanel(0, 6, 61);
+  drawLinkCellPanel(1, 123, 178);
 
-    bool connected = (i < 2) && nodeConnected(i);
-    lcd.setTextDatum(middle_right);
-    lcd.setTextColor(i < 2 ? (connected ? COLOR_SUCCESS : COLOR_DANGER)
-                           : COLOR_MUTED,
-                     COLOR_PANEL);
-    lcd.drawString(i < 2 ? (connected ? "CONNECTED" : "OFFLINE") : "N/A",
-                   226, y + 17);
-  }
+  // Decorative C / D cells: a muted strip advertising the 4-cell capability.
+  lcd.fillRoundRect(6, 252, 228, 14, 4, COLOR_PANEL);
+  lcd.setTextDatum(middle_center);
+  lcd.setTextSize(1);
+  lcd.setTextColor(COLOR_MUTED, COLOR_PANEL);
+  lcd.drawString("CELLS C / D: N/A (demo)", 120, 259);
 
   drawButton(65, 270, 110, 40, "HOME", COLOR_PANEL_LIGHT, true, COLOR_MUTED);
 }
 
+// One settings row in the Display-Load-A-B style: a filled COLOR_PANEL rounded
+// panel with a small COLOR_MUTED caption at the top-left and the current value
+// shown large to its left of the control buttons (buttons are drawn by the
+// caller). Returns nothing; the panel occupies (6, y, 228, SETTINGS_ROW_H).
+constexpr int SETTINGS_ROW_H = 54;
+void drawSettingsPanel(int y, const char* caption, const char* value,
+                       uint16_t valueColor) {
+  lcd.fillRoundRect(6, y, 228, SETTINGS_ROW_H, 9, COLOR_PANEL);
+  lcd.setTextDatum(top_left);
+  lcd.setTextSize(1);
+  lcd.setTextColor(COLOR_MUTED, COLOR_PANEL);
+  lcd.drawString(caption, 16, y + 7);
+  lcd.setTextDatum(middle_left);
+  lcd.setTextSize(2);
+  lcd.setTextColor(valueColor, COLOR_PANEL);
+  lcd.drawString(value, 16, y + 34);
+}
+
+// SETTINGS page restyled to match the DUAL display: each adjustable setting
+// gets a filled COLOR_PANEL panel with a muted caption, a large value and
+// palette-styled +/- or TOGGLE controls. The QUAD keeps its own settings
+// (lock threshold, auto-lock, brightness, decimals) and HOME/SAVE - there is
+// no CPU-clock control here. Button coordinates match the SCREEN_SETTINGS
+// hit-boxes in handleTouch().
 void drawSettings() {
   lcd.fillScreen(COLOR_BACKGROUND);
   drawHeader("SETTINGS");
 
-  lcd.setTextDatum(middle_left);
-  lcd.setTextColor(TFT_WHITE, COLOR_BACKGROUND);
-  lcd.setTextSize(1);
+  char value[24];
 
-  char line[48];
-  snprintf(line, sizeof(line), "Lock above: %.1f kg", settingLockThresholdKg);
-  lcd.drawString(line, 14, 58);
-  drawButton(136, 42, 46, 32, "-", COLOR_PRIMARY);
-  drawButton(188, 42, 46, 32, "+", COLOR_PRIMARY);
+  // Lock threshold: panel + / - controls.
+  snprintf(value, sizeof(value), "%.1f kg", settingLockThresholdKg);
+  drawSettingsPanel(34, "LOCK ABOVE", value, TFT_WHITE);
+  drawButton(130, 44, 46, 34, "-", COLOR_PRIMARY);
+  drawButton(182, 44, 46, 34, "+", COLOR_PRIMARY);
 
-  snprintf(line, sizeof(line), "Auto-lock: %s", settingAutoLock ? "ON" : "OFF");
-  lcd.drawString(line, 14, 110);
-  drawButton(150, 94, 84, 32, "TOGGLE", COLOR_SUCCESS);
+  // Auto-lock: panel + TOGGLE.
+  drawSettingsPanel(92, "AUTO-LOCK", settingAutoLock ? "ON" : "OFF",
+                    settingAutoLock ? COLOR_SUCCESS : COLOR_MUTED);
+  drawButton(130, 102, 98, 34, "TOGGLE",
+             settingAutoLock ? COLOR_SUCCESS : COLOR_PANEL_LIGHT, true,
+             settingAutoLock ? 0 : COLOR_MUTED);
 
-  snprintf(line, sizeof(line), "Brightness: %u%%", settingBrightnessPercent);
-  lcd.drawString(line, 14, 162);
-  drawButton(136, 146, 46, 32, "-", COLOR_PRIMARY);
-  drawButton(188, 146, 46, 32, "+", COLOR_PRIMARY);
+  // Display brightness: panel + / - controls.
+  snprintf(value, sizeof(value), "%u%%", settingBrightnessPercent);
+  drawSettingsPanel(150, "DISPLAY BRIGHTNESS", value, TFT_WHITE);
+  drawButton(130, 160, 46, 34, "-", COLOR_PRIMARY);
+  drawButton(182, 160, 46, 34, "+", COLOR_PRIMARY);
 
-  snprintf(line, sizeof(line), "Decimals: %u", settingDecimals);
-  lcd.drawString(line, 14, 214);
-  drawButton(150, 198, 84, 32, "TOGGLE", COLOR_PRIMARY);
+  // Decimals: panel + TOGGLE.
+  snprintf(value, sizeof(value), "%u", settingDecimals);
+  drawSettingsPanel(208, "DECIMALS", value, TFT_WHITE);
+  drawButton(130, 218, 98, 34, "TOGGLE", COLOR_PRIMARY);
 
-  lcd.setTextColor(COLOR_PRIMARY, COLOR_BACKGROUND);
-  lcd.drawString("Lock window: 1.0 kg for 4 seconds (fixed)", 14, 246);
-
+  // Navigation.
   drawButton(6, 270, 111, 40, "HOME", COLOR_PANEL_LIGHT, true, COLOR_MUTED);
   drawButton(123, 270, 111, 40, "SAVE", COLOR_SUCCESS);
 }
@@ -936,10 +1151,11 @@ void handleTouch() {
   registerActivity();
 
   if (screen == SCREEN_MAIN) {
-    // Header LINK / SET buttons.
-    if (inside(x, y, 96, 2, 64, 24)) {
+    // Header LINK / SET buttons (shifted left to make room for the battery
+    // indicator; hit-boxes match drawDashboardHeader()).
+    if (inside(x, y, 70, 2, 52, 24)) {
       changeScreen(SCREEN_LINK);
-    } else if (inside(x, y, 166, 2, 66, 24)) {
+    } else if (inside(x, y, 126, 2, 44, 24)) {
       changeScreen(SCREEN_SETTINGS);
     }
     // TARE ALL: tare both real nodes (A and B). C/D are decorative.
@@ -1034,21 +1250,22 @@ void handleTouch() {
   }
 
   if (screen == SCREEN_SETTINGS) {
-    if (inside(x, y, 136, 42, 46, 32)) {
+    // Hit-boxes match the panel button coordinates in drawSettings().
+    if (inside(x, y, 130, 44, 46, 34)) {
       settingLockThresholdKg = max(0.0f, settingLockThresholdKg - 0.5f);
-    } else if (inside(x, y, 188, 42, 46, 32)) {
+    } else if (inside(x, y, 182, 44, 46, 34)) {
       settingLockThresholdKg = min(100.0f, settingLockThresholdKg + 0.5f);
-    } else if (inside(x, y, 150, 94, 84, 32)) {
+    } else if (inside(x, y, 130, 102, 98, 34)) {
       settingAutoLock = !settingAutoLock;
-    } else if (inside(x, y, 136, 146, 46, 32)) {
+    } else if (inside(x, y, 130, 160, 46, 34)) {
       settingBrightnessPercent =
         max(25, (int)settingBrightnessPercent - 25);
       setBacklightPercent(settingBrightnessPercent);
-    } else if (inside(x, y, 188, 146, 46, 32)) {
+    } else if (inside(x, y, 182, 160, 46, 34)) {
       settingBrightnessPercent =
         min(100, (int)settingBrightnessPercent + 25);
       setBacklightPercent(settingBrightnessPercent);
-    } else if (inside(x, y, 150, 198, 84, 32)) {
+    } else if (inside(x, y, 130, 218, 98, 34)) {
       settingDecimals = settingDecimals == 2 ? 3 : 2;
     } else if (inside(x, y, 6, 270, 111, 40)) {
       changeScreen(SCREEN_MAIN);
@@ -1086,6 +1303,12 @@ void setup() {
   setBacklightPercent(settingBrightnessPercent);
   lcd.fillScreen(COLOR_BACKGROUND);
 
+  // Battery ADC setup (Arduino core; unaffected by LovyanGFX) and one priming
+  // read so the indicator shows a value on the first dashboard draw.
+  analogReadResolution(12);
+  analogSetPinAttenuation(BATTERY_SENSE_PIN, ADC_11db);
+  updateBatteryReading(true);
+
   setupTouch();
   setupEspNow();
   registerActivity();
@@ -1103,7 +1326,9 @@ void loop() {
     changeScreen(SCREEN_MAIN);
   }
 
+  updateBatteryReading();
   renderScreen();
   serviceDashboardBorders();
+  serviceBatteryIndicator();
   delay(10);
 }
