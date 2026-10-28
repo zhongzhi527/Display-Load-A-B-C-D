@@ -91,6 +91,10 @@ struct NodeData {
   uint8_t status = STATUS_MEASURING;
   bool locked = false;
   unsigned long lastPacketMs = 0;
+  // millis() of the first packet after the link (re)came up. Used to show a
+  // brief SYNCING window right after connecting, before settling to CONNECTED.
+  // 0 while offline.
+  unsigned long firstPacketMs = 0;
   uint8_t lastCommand = COMMAND_NONE;
   uint8_t commandResult = COMMAND_RESULT_NONE;
 };
@@ -188,6 +192,10 @@ float paintedTotal = NAN;
 uint8_t paintedStatus[2] = {255, 255};
 bool paintedConnected[2] = {false, false};
 bool paintedLocked[2] = {false, false};
+// Last-painted SYNCING state per cell. SYNCING -> CONNECTED is a time-based
+// transition (not a status change), so track it explicitly to force a repaint
+// of the word + border when the sync window expires.
+bool paintedSyncing[2] = {false, false};
 bool paintedHeaderConnected[2] = {false, false};
 bool paintedHeaderValid = false;
 
@@ -240,47 +248,52 @@ float totalWeightKg() {
   return total;
 }
 
-// A connected node is "syncing" (not yet fully established) while it is still
-// in the initial MEASURING state and has not reported a STABLE reading or any
-// active/locked state yet. Once it reports STABLE (or an active op / lock /
-// cal-complete / error) it is treated as fully CONNECTED. This drives the
+// How long after the link (re)comes up a cell shows SYNCING before settling to
+// CONNECTED. This is a pure link indicator - it does NOT depend on weight being
+// loaded (the scale only reports STATUS_STABLE when weight is on it, so we must
+// not gate CONNECTED on that, or an empty-but-connected scale would show
+// SYNCING forever).
+constexpr unsigned long SYNC_WINDOW_MS = 2000;
+
 // 3-stage lifecycle: OFFLINE (red) -> SYNCING (yellow) -> CONNECTED (green).
+// SYNCING = connected, but still inside the brief post-connect window.
 bool nodeSyncing(uint8_t i) {
   return nodeConnected(i) && !nodes[i].locked &&
-         nodes[i].status == STATUS_MEASURING;
+         nodes[i].firstPacketMs != 0 &&
+         millis() - nodes[i].firstPacketMs < SYNC_WINDOW_MS;
 }
 
 const char* statusText(uint8_t i) {
   if (!nodeConnected(i)) return "OFFLINE";
   if (nodes[i].locked) return "LOCKED";
+  // Active operations take priority over the generic link state.
   switch (nodes[i].status) {
-    case STATUS_MEASURING: return "SYNCING";
-    case STATUS_STABLE: return "CONNECTED";
     case STATUS_TARING: return "TARING";
     case STATUS_CALIBRATING: return "CALIBRATING";
     case STATUS_CALIBRATION_COMPLETE: return "CAL COMPLETE";
     case STATUS_ERROR: return "ERROR";
-    default: return "CONNECTED";
+    default: break;
   }
+  // Otherwise it is the link lifecycle: SYNCING just after connecting, then
+  // CONNECTED (regardless of whether weight is loaded).
+  return nodeSyncing(i) ? "SYNCING" : "CONNECTED";
 }
 
 uint32_t statusColor(uint8_t i) {
-  // 3-stage connection lifecycle:
+  // 3-stage connection lifecycle (kept in lock-step with statusText and
+  // cellBorderColor so the word and the outline are always the same colour):
   //   OFFLINE  -> red     (no packets)
-  //   SYNCING  -> yellow  (connected, still settling / MEASURING)
-  //   CONNECTED-> green   (connected and reporting STABLE / ok)
+  //   SYNCING  -> yellow  (connected, inside the brief post-connect window)
+  //   CONNECTED-> green   (connected and streaming, with or without weight)
   if (!nodeConnected(i)) return COLOR_DANGER;             // OFFLINE
   if (nodes[i].status == STATUS_ERROR) return COLOR_DANGER;  // ERROR
-  if (nodeSyncing(i)) return COLOR_WARNING;               // SYNCING
-  switch (nodes[i].status) {
-    // Active operations in progress: amber.
-    case STATUS_TARING:
-    case STATUS_CALIBRATING:
-      return COLOR_WARNING;
-    // Connected and established (STABLE / LOCKED / CAL-COMPLETE): green.
-    default:
-      return COLOR_SUCCESS;
+  // Active operations in progress: amber.
+  if (nodes[i].status == STATUS_TARING ||
+      nodes[i].status == STATUS_CALIBRATING) {
+    return COLOR_WARNING;
   }
+  if (nodeSyncing(i)) return COLOR_WARNING;               // SYNCING
+  return COLOR_SUCCESS;                                   // CONNECTED
 }
 
 // Weighted blend of two RGB565 colours: returns fg mixed over bg with
@@ -318,7 +331,14 @@ uint16_t cellBorderColor(uint8_t i) {
   }
   if (nodes[i].status == STATUS_ERROR)
     return animatedBorderColor(COLOR_DANGER, BLINK_ERROR_MS);
-  // SYNCING: connected but still settling -> pulse yellow.
+  // Active operations (taring / calibrating) -> pulse yellow, matching the
+  // yellow status word for those states.
+  if (nodes[i].status == STATUS_TARING ||
+      nodes[i].status == STATUS_CALIBRATING) {
+    return animatedBorderColor(COLOR_WARNING, BLINK_SEARCH_MS);
+  }
+  // SYNCING: connected but still inside the post-connect window -> pulse
+  // yellow.
   if (nodeSyncing(i)) {
     return animatedBorderColor(COLOR_WARNING, BLINK_SEARCH_MS);
   }
@@ -336,6 +356,7 @@ void resetPaintCache() {
   paintedStatus[0] = paintedStatus[1] = 255;
   paintedConnected[0] = paintedConnected[1] = false;
   paintedLocked[0] = paintedLocked[1] = false;
+  paintedSyncing[0] = paintedSyncing[1] = false;
   paintedHeaderValid = false;
   cellBorderDrawn[0] = cellBorderDrawn[1] = 0xFFFF;
 }
@@ -634,12 +655,14 @@ void drawMainStatic() {
 void updateMainNode(uint8_t i) {
   int y = CELL_ROW_Y[i];
   bool connected = nodeConnected(i);
+  bool syncing = nodeSyncing(i);
   bool changed =
     isnan(paintedWeight[i]) ||
     fabsf(paintedWeight[i] - nodes[i].weightKg) >= 0.001f ||
     paintedStatus[i] != nodes[i].status ||
     paintedConnected[i] != connected ||
-    paintedLocked[i] != nodes[i].locked;
+    paintedLocked[i] != nodes[i].locked ||
+    paintedSyncing[i] != syncing;
 
   if (!changed) return;
 
@@ -667,6 +690,7 @@ void updateMainNode(uint8_t i) {
   paintedStatus[i] = nodes[i].status;
   paintedConnected[i] = connected;
   paintedLocked[i] = nodes[i].locked;
+  paintedSyncing[i] = syncing;
 
   // The weight-area clear painted over the right edge of the panel border;
   // redraw the border and re-sync the cache so the animated border and this
@@ -815,16 +839,17 @@ int calSelY(uint8_t cell) {
   return (cell >= 2) ? CAL_SEL_ROW2_Y : CAL_SEL_ROW1_Y;
 }
 
-// Draw one selector button. Selected -> COLOR_PRIMARY fill (border auto);
-// unselected -> COLOR_PANEL_LIGHT fill + COLOR_MUTED border. `pressed` forces
-// the highlighted look for brief tap feedback.
+// Draw one selector button. The whole block is filled: gray at rest
+// (COLOR_MUTED), solid blue (COLOR_PRIMARY) when selected or pressed - so the
+// entire button changes colour, not just its outline. `pressed` forces the
+// blue look for brief tap feedback.
 void drawCalSelector(uint8_t cell, bool pressed = false) {
   char label[16];
   snprintf(label, sizeof(label), "LOAD CELL %c", calCellLetter(cell));
   bool hot = pressed || calSelectedCell == cell;
   drawButton(calSelX(cell), calSelY(cell), CAL_SEL_W, CAL_SEL_H, label,
-             hot ? COLOR_PRIMARY : COLOR_PANEL_LIGHT, true,
-             hot ? 0 : COLOR_MUTED);
+             hot ? COLOR_PRIMARY : COLOR_MUTED, true,
+             hot ? COLOR_PRIMARY : COLOR_MUTED);
 }
 
 // Redraw just the KNOWN WEIGHT panel caption + value (no full-screen clear).
@@ -850,7 +875,7 @@ void drawCalKnownWeight() {
 }
 
 // Redraw the full-width TARE and CALIBRATE buttons for the selected cell. Both
-// rest in the grey look (COLOR_PANEL_LIGHT fill + COLOR_MUTED border) like
+// rest in the grey look (filled COLOR_MUTED) like
 // every other calibrate control, and light up blue (COLOR_PRIMARY) only while
 // pressed. For C/D (decorative, never connected) both are drawn disabled
 // (greyed, text muted). `pressedTare`/`pressedCal` force the pressed look for
@@ -864,10 +889,10 @@ void drawCalActionButtons(bool pressedTare = false, bool pressedCal = false) {
   snprintf(calLabel, sizeof(calLabel), "CALIBRATE LOAD CELL %c", letter);
 
   drawButton(6, CAL_TARE_Y, 228, CAL_TARE_H, tareLabel,
-             pressedTare ? COLOR_PRIMARY : COLOR_PANEL_LIGHT, connected,
+             pressedTare ? COLOR_PRIMARY : COLOR_MUTED, connected,
              pressedTare ? COLOR_PRIMARY : COLOR_MUTED);
   drawButton(6, CAL_CAL_Y, 228, CAL_CAL_H, calLabel,
-             pressedCal ? COLOR_PRIMARY : COLOR_PANEL_LIGHT, connected,
+             pressedCal ? COLOR_PRIMARY : COLOR_MUTED, connected,
              pressedCal ? COLOR_PRIMARY : COLOR_MUTED);
 }
 
@@ -911,17 +936,17 @@ void drawCalibrateStatic() {
   drawCalKnownWeight();
 
   // LOAD CELL A / B / C / D selector as a 2x2 grid (A/B row 1, C/D row 2).
-  // Selected cell = COLOR_PRIMARY fill; others = COLOR_PANEL_LIGHT + muted.
+  // Selected cell = solid blue fill; others = filled gray (COLOR_MUTED).
   for (uint8_t cell = 0; cell < 4; cell++) {
     drawCalSelector(cell);
   }
 
   // Four adjust buttons (-1 / -0.1 / +0.1 / +1). Drawn from the shared table so
-  // their positions match the hit-boxes in handleTouch() exactly.
-  // COLOR_PANEL_LIGHT fill + COLOR_MUTED border (match the DUAL display).
+  // their positions match the hit-boxes in handleTouch() exactly. Filled gray
+  // (COLOR_MUTED) at rest; they flash solid blue while pressed.
   for (uint8_t i = 0; i < CAL_ADJUST_BUTTON_COUNT; i++) {
     const CalAdjustButton& b = CAL_ADJUST_BUTTONS[i];
-    drawButton(b.x, b.y, b.w, b.h, b.label, COLOR_PANEL_LIGHT, true,
+    drawButton(b.x, b.y, b.w, b.h, b.label, COLOR_MUTED, true,
                COLOR_MUTED);
   }
 
@@ -1228,6 +1253,12 @@ void onDataReceived(const uint8_t* senderMac,
   uint8_t i = packet.nodeId - 1;
   if (memcmp(senderMac, nodeMac[i], 6) != 0) return;
 
+  // If this is the first packet after being offline, stamp the sync-window
+  // start so the cell briefly shows SYNCING before settling to CONNECTED.
+  if (!nodeConnected(i)) {
+    nodes[i].firstPacketMs = millis();
+  }
+
   nodes[i].weightKg = packet.weightKg;
   nodes[i].locked = packet.locked != 0;
   nodes[i].status = packet.status;
@@ -1447,14 +1478,15 @@ void handleTouch() {
     for (uint8_t i = 0; i < CAL_ADJUST_BUTTON_COUNT; i++) {
       const CalAdjustButton& b = CAL_ADJUST_BUTTONS[i];
       if (inside(x, y, b.x, b.y, b.w, b.h)) {
-        // Brief press feedback on the tapped adjust button.
+        // Brief press feedback: whole block turns solid blue, then back to
+        // gray on release.
         drawButton(b.x, b.y, b.w, b.h, b.label, COLOR_PRIMARY, true,
                    COLOR_PRIMARY);
         delay(80);
         float next = calibrationWeightKg + b.deltaKg;
         next = roundf(next * 10.0f) / 10.0f;
         calibrationWeightKg = constrain(next, 0.1f, 100.0f);
-        drawButton(b.x, b.y, b.w, b.h, b.label, COLOR_PANEL_LIGHT, true,
+        drawButton(b.x, b.y, b.w, b.h, b.label, COLOR_MUTED, true,
                    COLOR_MUTED);
         drawCalKnownWeight();
         return;
