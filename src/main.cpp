@@ -160,8 +160,9 @@ float settingLockThresholdKg = 5.0f;
 bool settingAutoLock = true;
 uint8_t settingBrightnessPercent = 100;
 // Decimal places for formatWeight(). No longer user-adjustable (the Settings
-// toggle was removed); hard-fixed at 3 and read only by formatWeight().
-uint8_t settingDecimals = 3;
+// toggle was removed); hard-fixed at 2 (kg shown to 2 dp) and read only by
+// formatWeight().
+uint8_t settingDecimals = 2;
 
 unsigned long lastTouchMs = 0;
 unsigned long doneUntilMs = 0;
@@ -239,32 +240,44 @@ float totalWeightKg() {
   return total;
 }
 
+// A connected node is "syncing" (not yet fully established) while it is still
+// in the initial MEASURING state and has not reported a STABLE reading or any
+// active/locked state yet. Once it reports STABLE (or an active op / lock /
+// cal-complete / error) it is treated as fully CONNECTED. This drives the
+// 3-stage lifecycle: OFFLINE (red) -> SYNCING (yellow) -> CONNECTED (green).
+bool nodeSyncing(uint8_t i) {
+  return nodeConnected(i) && !nodes[i].locked &&
+         nodes[i].status == STATUS_MEASURING;
+}
+
 const char* statusText(uint8_t i) {
   if (!nodeConnected(i)) return "OFFLINE";
   if (nodes[i].locked) return "LOCKED";
   switch (nodes[i].status) {
-    case STATUS_STABLE: return "STABLE";
+    case STATUS_MEASURING: return "SYNCING";
+    case STATUS_STABLE: return "CONNECTED";
     case STATUS_TARING: return "TARING";
     case STATUS_CALIBRATING: return "CALIBRATING";
     case STATUS_CALIBRATION_COMPLETE: return "CAL COMPLETE";
     case STATUS_ERROR: return "ERROR";
-    default: return "STABILIZING";
+    default: return "CONNECTED";
   }
 }
 
 uint32_t statusColor(uint8_t i) {
+  // 3-stage connection lifecycle:
+  //   OFFLINE  -> red     (no packets)
+  //   SYNCING  -> yellow  (connected, still settling / MEASURING)
+  //   CONNECTED-> green   (connected and reporting STABLE / ok)
   if (!nodeConnected(i)) return COLOR_DANGER;             // OFFLINE
-  // Connected + error is red; connected + active operation (TARING /
-  // CALIBRATING) is amber; every other connected-and-ok state (STABILIZING /
-  // MEASURING / STABLE / LOCKED / CAL-COMPLETE) is green.
   if (nodes[i].status == STATUS_ERROR) return COLOR_DANGER;  // ERROR
+  if (nodeSyncing(i)) return COLOR_WARNING;               // SYNCING
   switch (nodes[i].status) {
     // Active operations in progress: amber.
     case STATUS_TARING:
     case STATUS_CALIBRATING:
       return COLOR_WARNING;
-    // Connected and ok (incl. STABILIZING / MEASURING / STABLE / LOCKED /
-    // CAL-COMPLETE): green.
+    // Connected and established (STABLE / LOCKED / CAL-COMPLETE): green.
     default:
       return COLOR_SUCCESS;
   }
@@ -292,21 +305,25 @@ uint16_t animatedBorderColor(uint16_t bright, uint32_t halfPeriodMs) {
   return brightPhase ? bright : blendRgb565(bright, COLOR_PANEL, 72);
 }
 
-// Border colour for a real cell panel (A=0, B=1), driven by its live state:
+// Border colour for a real cell panel (A=0, B=1), driven by the 3-stage
+// connection lifecycle so the flash colour matches the status text:
+//   OFFLINE              -> pulsing red   (no packets)
 //   connected + error    -> pulsing red
-//   connected (any ok)   -> solid green (no blink) - being connected and
-//                           receiving packets is enough to stop the pulse
-//   offline / searching  -> pulsing amber (trying to connect)
+//   SYNCING              -> pulsing yellow (connected, still settling)
+//   CONNECTED (any ok)   -> solid green (no blink) - established and reporting
 uint16_t cellBorderColor(uint8_t i) {
-  if (nodeConnected(i)) {
-    if (nodes[i].status == STATUS_ERROR)
-      return animatedBorderColor(COLOR_DANGER, BLINK_ERROR_MS);
-    // Connected and not in error -> solid green, no pulsing. Receiving packets
-    // (even while MEASURING / STABILIZING / TARING / CALIBRATING) is enough.
-    return COLOR_SUCCESS;
+  // Not connected: pulse red (OFFLINE).
+  if (!nodeConnected(i)) {
+    return animatedBorderColor(COLOR_DANGER, BLINK_ERROR_MS);
   }
-  // Not connected: pulse amber while trying to connect / searching.
-  return animatedBorderColor(COLOR_WARNING, BLINK_SEARCH_MS);
+  if (nodes[i].status == STATUS_ERROR)
+    return animatedBorderColor(COLOR_DANGER, BLINK_ERROR_MS);
+  // SYNCING: connected but still settling -> pulse yellow.
+  if (nodeSyncing(i)) {
+    return animatedBorderColor(COLOR_WARNING, BLINK_SEARCH_MS);
+  }
+  // CONNECTED and established -> solid green, no pulsing.
+  return COLOR_SUCCESS;
 }
 
 void registerActivity() {
@@ -763,6 +780,17 @@ constexpr int CAL_TARE_Y = 226;
 constexpr int CAL_TARE_H = 34;
 constexpr int CAL_CAL_Y = 264;
 constexpr int CAL_CAL_H = 34;
+// A one-line status strip below the CALIBRATE button, mirroring the DUAL
+// scale's small feedback line: it shows "Taring Load Cell X..." while a tare
+// is running, or "Load Cell X is not connected" when a disabled action is
+// tapped. Centered at x=120.
+constexpr int CAL_MSG_Y = 304;
+
+// Calibrate-page status message. Empty string = nothing shown. calMsgColor is
+// the text colour (warning yellow for "not connected", success green while
+// taring). Redrawn only by drawCalMessage() so it never flashes the page.
+char calMessage[40] = "";
+uint32_t calMessageColor = COLOR_WARNING;
 
 // Is a calibrate-selector cell (0..3) a real, connected node? C/D (2/3) are
 // decorative and treated as never connected, so their actions stay disabled.
@@ -841,6 +869,27 @@ void drawCalActionButtons(bool pressedTare = false, bool pressedCal = false) {
              COLOR_PRIMARY);
 }
 
+// Set and draw the calibrate-page status message (clears the strip first so it
+// never leaves stale text). Pass "" to clear it. Only touches the message
+// strip, so it does not flash the rest of the page.
+void drawCalMessage() {
+  lcd.fillRect(6, CAL_MSG_Y - 7, 228, 14, COLOR_BACKGROUND);
+  if (calMessage[0] == '\0') {
+    return;
+  }
+  lcd.setTextDatum(middle_center);
+  lcd.setTextSize(1);
+  lcd.setTextColor(calMessageColor, COLOR_BACKGROUND);
+  lcd.drawString(calMessage, 120, CAL_MSG_Y);
+  lcd.setTextDatum(top_left);
+}
+
+void setCalMessage(const char* msg, uint32_t color) {
+  snprintf(calMessage, sizeof(calMessage), "%s", msg);
+  calMessageColor = color;
+  drawCalMessage();
+}
+
 void drawCalibrateStatic() {
   lcd.fillScreen(COLOR_BACKGROUND);
   drawHeader("CALIBRATE");
@@ -877,6 +926,9 @@ void drawCalibrateStatic() {
   // Full-width TARE and CALIBRATE buttons for the selected cell (disabled for
   // the decorative C/D cells).
   drawCalActionButtons();
+
+  // Status message strip (starts empty; set by taps on TARE/CALIBRATE).
+  drawCalMessage();
 
   resetPaintCache();
 }
@@ -1379,6 +1431,8 @@ void handleTouch() {
         drawCalSelector(cell);
         drawCalKnownWeight();
         drawCalActionButtons();
+        // Clear any stale "not connected" / "taring" message for the old cell.
+        setCalMessage("", COLOR_WARNING);
         return;
       }
     }
@@ -1405,23 +1459,47 @@ void handleTouch() {
       }
     }
 
-    // Full-width TARE: tare only the selected cell (real cells A/B only).
-    if (inside(x, y, 6, CAL_TARE_Y, 228, CAL_TARE_H) &&
-        calCellConnected(calSelectedCell)) {
+    // Full-width TARE: tare only the selected cell. If the cell is not
+    // connected (offline, or a decorative C/D cell) show the DUAL-style
+    // "Load Cell X is not connected" message instead of doing nothing.
+    if (inside(x, y, 6, CAL_TARE_Y, 228, CAL_TARE_H)) {
+      if (!calCellConnected(calSelectedCell)) {
+        char msg[40];
+        snprintf(msg, sizeof(msg), "Load Cell %c is not connected",
+                 calCellLetter(calSelectedCell));
+        setCalMessage(msg, COLOR_DANGER);
+        return;
+      }
       // Brief press feedback, then send and restore the button.
       drawCalActionButtons(/*pressedTare=*/true, /*pressedCal=*/false);
       delay(80);
       sendCommand(selectedNode, COMMAND_TARE);
       drawCalActionButtons();
+      // Small "taring" feedback line below, like the DUAL scale. The tare
+      // command is fire-and-forget and completes quickly on the node, so show
+      // the message briefly then clear it (the calibrate page is static and
+      // has no per-frame service to clear it later).
+      char msg[40];
+      snprintf(msg, sizeof(msg), "Taring Load Cell %c...",
+               calCellLetter(calSelectedCell));
+      setCalMessage(msg, COLOR_SUCCESS);
+      delay(1200);
+      setCalMessage("", COLOR_WARNING);
       return;
     }
 
     // Full-width CALIBRATE: enter the guided calibration wizard for the
-    // selected cell (real cells A/B only). Preserves the QUAD's existing
-    // SCREEN_CAL_WEIGHT flow and the onDataReceived handshake. This DOES change
-    // screens, so the full redraw via changeScreen() is expected here.
-    if (inside(x, y, 6, CAL_CAL_Y, 228, CAL_CAL_H) &&
-        calCellConnected(calSelectedCell)) {
+    // selected cell. Preserves the QUAD's existing SCREEN_CAL_WEIGHT flow and
+    // the onDataReceived handshake. If the cell is not connected, show the
+    // "not connected" message instead of entering the wizard.
+    if (inside(x, y, 6, CAL_CAL_Y, 228, CAL_CAL_H)) {
+      if (!calCellConnected(calSelectedCell)) {
+        char msg[40];
+        snprintf(msg, sizeof(msg), "Load Cell %c is not connected",
+                 calCellLetter(calSelectedCell));
+        setCalMessage(msg, COLOR_DANGER);
+        return;
+      }
       drawCalActionButtons(/*pressedTare=*/false, /*pressedCal=*/true);
       delay(80);
       changeScreen(SCREEN_CAL_WEIGHT);
@@ -1614,7 +1692,7 @@ void setup() {
 
   preferences.begin("display", false);
   settingBrightnessPercent = preferences.getUChar("brightness", 100);
-  settingDecimals = 3;  // fixed; no longer a user setting
+  settingDecimals = 2;  // fixed; no longer a user setting (kg to 2 dp)
   settingLockThresholdKg = preferences.getFloat("lockKg", 5.0f);
   settingAutoLock = preferences.getBool("autoLock", true);
 
