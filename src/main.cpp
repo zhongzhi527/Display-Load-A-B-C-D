@@ -49,7 +49,6 @@ constexpr uint16_t COLOR_MUTED       = 0x8D16;  // grey
 
 // Pulsing-border animation timing (half periods, in ms) and service cadence.
 constexpr uint32_t BLINK_SEARCH_MS = 700;
-constexpr uint32_t BLINK_ATTENTION_MS = 900;
 constexpr uint32_t BLINK_ERROR_MS = 800;
 constexpr unsigned long BORDER_SERVICE_MS = 50;
 
@@ -95,8 +94,6 @@ struct NodeData {
   // brief SYNCING window right after connecting, before settling to CONNECTED.
   // 0 while offline.
   unsigned long firstPacketMs = 0;
-  uint8_t lastCommand = COMMAND_NONE;
-  uint8_t commandResult = COMMAND_RESULT_NONE;
 };
 
 class LGFX : public lgfx::LGFX_Device {
@@ -1263,8 +1260,6 @@ void onDataReceived(const uint8_t* senderMac,
   nodes[i].locked = packet.locked != 0;
   nodes[i].status = packet.status;
   nodes[i].lastPacketMs = millis();
-  nodes[i].lastCommand = packet.lastCommand;
-  nodes[i].commandResult = packet.commandResult;
 
   if (i == selectedNode) {
     if (waitingForTare &&
