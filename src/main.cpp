@@ -77,11 +77,6 @@ enum Screen : uint8_t {
   SCREEN_MAIN,
   SCREEN_LINK,
   SCREEN_CALIBRATE,
-  SCREEN_CAL_WEIGHT,
-  SCREEN_CAL_REMOVE,
-  SCREEN_CAL_PLACE,
-  SCREEN_CAL_DONE,
-  SCREEN_EXIT_CONFIRM,
   SCREEN_SETTINGS
 };
 
@@ -144,7 +139,6 @@ Preferences preferences;
 NodeData nodes[2];
 
 Screen screen = SCREEN_MAIN;
-Screen screenBeforeExitConfirm = SCREEN_MAIN;
 uint8_t selectedNode = 0;
 // Which of the four calibrate-page selector cells (0=A, 1=B, 2=C, 3=D) is
 // highlighted. Only 0/1 map to a real node (selectedNode); 2/3 (C/D) are
@@ -152,8 +146,6 @@ uint8_t selectedNode = 0;
 // their TARE/CALIBRATE actions stay disabled.
 uint8_t calSelectedCell = 0;
 float calibrationWeightKg = 5.0f;
-bool waitingForTare = false;
-bool waitingForCalibration = false;
 bool staticScreenRequired = true;
 bool espNowReady = false;
 
@@ -166,7 +158,6 @@ uint8_t settingBrightnessPercent = 100;
 uint8_t settingDecimals = 2;
 
 unsigned long lastTouchMs = 0;
-unsigned long doneUntilMs = 0;
 
 // Idle-sleep (SNOOZE) state, mirroring the DUAL display. screenSleeping is true
 // while the LCD + backlight are off; idleWarningActive is true while the last
@@ -957,66 +948,6 @@ void drawCalibrateStatic() {
   resetPaintCache();
 }
 
-void drawSimpleMessage(const char* title, const char* line1,
-                       const char* line2 = nullptr) {
-  lcd.fillScreen(COLOR_BACKGROUND);
-  drawHeader(title);
-  lcd.setTextDatum(top_center);
-  lcd.setTextColor(TFT_WHITE, COLOR_BACKGROUND);
-  lcd.setTextSize(2);
-  lcd.drawString(line1, 120, 70);
-  if (line2) {
-    lcd.setTextSize(1);
-    lcd.setTextColor(COLOR_WARNING, COLOR_BACKGROUND);
-    lcd.drawString(line2, 120, 120);
-  }
-}
-
-void drawCalWeight() {
-  drawSimpleMessage(selectedNode == 0 ? "CALIBRATE A" : "CALIBRATE B",
-                    "Choose known weight");
-
-  char text[20];
-  snprintf(text, sizeof(text), "%.1f kg", calibrationWeightKg);
-  lcd.setTextDatum(middle_center);
-  lcd.setTextColor(COLOR_WARNING, COLOR_BACKGROUND);
-  lcd.setTextSize(4);
-  lcd.drawString(text, 120, 165);
-
-  drawButton(6, 230, 68, 54, "-", COLOR_PRIMARY);
-  drawButton(86, 230, 68, 54, "+", COLOR_PRIMARY);
-  drawButton(166, 230, 68, 54, "NEXT", COLOR_SUCCESS);
-}
-
-void drawCalRemove() {
-  drawSimpleMessage("STEP 1 OF 2",
-                    waitingForTare ? "Taring..." : "Remove all weight",
-                    waitingForTare ? "Please wait" : "Then press TARE");
-  if (!waitingForTare) drawButton(30, 210, 180, 54, "TARE", COLOR_PRIMARY);
-}
-
-void drawCalPlace() {
-  char line[30];
-  snprintf(line, sizeof(line), "Place %.1f kg", calibrationWeightKg);
-  drawSimpleMessage("STEP 2 OF 2",
-                    waitingForCalibration ? "Calibrating..." : line,
-                    waitingForCalibration ? "Keep weight still" : "Then press START");
-  if (!waitingForCalibration)
-    drawButton(30, 210, 180, 54, "START", COLOR_SUCCESS);
-}
-
-void drawCalDone() {
-  drawSimpleMessage("CALIBRATION", "COMPLETE", "Calibration saved");
-  drawButton(50, 210, 140, 50, "DONE", COLOR_PRIMARY);
-}
-
-void drawExitConfirm() {
-  drawSimpleMessage("EXIT CALIBRATION", "Return to main menu?",
-                    "The current load-cell operation may finish.");
-  drawButton(18, 210, 96, 54, "NO", COLOR_PANEL_LIGHT, true, COLOR_MUTED);
-  drawButton(126, 210, 96, 54, "YES", COLOR_DANGER);
-}
-
 // One label/value pair inside a LINK STATUS panel (Display-Load-A-B style): a
 // small muted caption with the coloured value centred just below it. `centerX`
 // is the panel's horizontal centre; `labelY` the caption baseline-top.
@@ -1157,11 +1088,6 @@ void renderScreen() {
       case SCREEN_MAIN: drawMainStatic(); break;
       case SCREEN_LINK: drawLinkStatus(); break;
       case SCREEN_CALIBRATE: drawCalibrateStatic(); break;
-      case SCREEN_CAL_WEIGHT: drawCalWeight(); break;
-      case SCREEN_CAL_REMOVE: drawCalRemove(); break;
-      case SCREEN_CAL_PLACE: drawCalPlace(); break;
-      case SCREEN_CAL_DONE: drawCalDone(); break;
-      case SCREEN_EXIT_CONFIRM: drawExitConfirm(); break;
       case SCREEN_SETTINGS: drawSettings(); break;
     }
     staticScreenRequired = false;
@@ -1260,26 +1186,6 @@ void onDataReceived(const uint8_t* senderMac,
   nodes[i].locked = packet.locked != 0;
   nodes[i].status = packet.status;
   nodes[i].lastPacketMs = millis();
-
-  if (i == selectedNode) {
-    if (waitingForTare &&
-        packet.lastCommand == COMMAND_TARE &&
-        packet.commandResult == COMMAND_RESULT_OK) {
-      waitingForTare = false;
-      changeScreen(SCREEN_CAL_PLACE);
-    }
-
-    if (waitingForCalibration &&
-        packet.lastCommand == COMMAND_CALIBRATE) {
-      waitingForCalibration = false;
-      if (packet.commandResult == COMMAND_RESULT_OK) {
-        doneUntilMs = millis() + 2500;
-        changeScreen(SCREEN_CAL_DONE);
-      } else {
-        changeScreen(SCREEN_CALIBRATE);
-      }
-    }
-  }
 }
 
 void setupEspNow() {
@@ -1300,25 +1206,10 @@ void setupEspNow() {
   espNowReady = true;
 }
 
-bool calibrationScreenActive() {
-  return screen == SCREEN_CAL_WEIGHT ||
-         screen == SCREEN_CAL_REMOVE ||
-         screen == SCREEN_CAL_PLACE;
-}
-
 void requestHome() {
   registerActivity();
-
   if (screen == SCREEN_MAIN) return;
-
-  if (calibrationScreenActive()) {
-    screenBeforeExitConfirm = screen;
-    changeScreen(SCREEN_EXIT_CONFIRM);
-  } else {
-    waitingForTare = false;
-    waitingForCalibration = false;
-    changeScreen(SCREEN_MAIN);
-  }
+  changeScreen(SCREEN_MAIN);
 }
 
 // Forward declaration: defined further down with the other idle-sleep
@@ -1517,10 +1408,10 @@ void handleTouch() {
       return;
     }
 
-    // Full-width CALIBRATE: enter the guided calibration wizard for the
-    // selected cell. Preserves the QUAD's existing SCREEN_CAL_WEIGHT flow and
-    // the onDataReceived handshake. If the cell is not connected, show the
-    // "not connected" message instead of entering the wizard.
+    // Full-width CALIBRATE: calibrate the selected cell in place, exactly like
+    // the DUAL display - no wizard. The known weight is already set with the
+    // -1/-0.1/+0.1/+1 buttons above; tare first with the TARE button. If the
+    // cell is not connected, show the "not connected" message instead.
     if (inside(x, y, 6, CAL_CAL_Y, 228, CAL_CAL_H)) {
       if (!calCellConnected(calSelectedCell)) {
         char msg[40];
@@ -1529,62 +1420,18 @@ void handleTouch() {
         setCalMessage(msg, COLOR_DANGER);
         return;
       }
+      // Brief press feedback, then send the calibrate command and restore.
       drawCalActionButtons(/*pressedTare=*/false, /*pressedCal=*/true);
       delay(80);
-      changeScreen(SCREEN_CAL_WEIGHT);
+      sendCommand(selectedNode, COMMAND_CALIBRATE, calibrationWeightKg);
+      drawCalActionButtons();
+      char msg[40];
+      snprintf(msg, sizeof(msg), "Calibrating Load Cell %c with %.1f kg...",
+               calCellLetter(calSelectedCell), calibrationWeightKg);
+      setCalMessage(msg, COLOR_SUCCESS);
+      delay(1200);
+      setCalMessage("", COLOR_WARNING);
       return;
-    }
-    return;
-  }
-
-  if (screen == SCREEN_CAL_WEIGHT) {
-    if (inside(x, y, 6, 230, 68, 54)) {
-      flashButton(6, 230, 68, 54, "-", COLOR_PRIMARY);
-      calibrationWeightKg = max(0.1f, calibrationWeightKg - 0.1f);
-      staticScreenRequired = true;
-    } else if (inside(x, y, 86, 230, 68, 54)) {
-      flashButton(86, 230, 68, 54, "+", COLOR_PRIMARY);
-      calibrationWeightKg = min(100.0f, calibrationWeightKg + 0.1f);
-      staticScreenRequired = true;
-    } else if (inside(x, y, 166, 230, 68, 54)) {
-      flashButton(166, 230, 68, 54, "NEXT", COLOR_SUCCESS);
-      changeScreen(SCREEN_CAL_REMOVE);
-    }
-    return;
-  }
-
-  if (screen == SCREEN_CAL_REMOVE && !waitingForTare &&
-      inside(x, y, 30, 210, 180, 54)) {
-    flashButton(30, 210, 180, 54, "TARE", COLOR_PRIMARY);
-    waitingForTare = true;
-    sendCommand(selectedNode, COMMAND_TARE);
-    staticScreenRequired = true;
-    return;
-  }
-
-  if (screen == SCREEN_CAL_PLACE && !waitingForCalibration &&
-      inside(x, y, 30, 210, 180, 54)) {
-    flashButton(30, 210, 180, 54, "START", COLOR_SUCCESS);
-    waitingForCalibration = true;
-    sendCommand(selectedNode, COMMAND_CALIBRATE, calibrationWeightKg);
-    staticScreenRequired = true;
-    return;
-  }
-
-  if (screen == SCREEN_CAL_DONE &&
-      inside(x, y, 50, 210, 140, 50)) {
-    flashButton(50, 210, 140, 50, "DONE", COLOR_PRIMARY);
-    changeScreen(SCREEN_MAIN);
-    return;
-  }
-
-  if (screen == SCREEN_EXIT_CONFIRM) {
-    if (inside(x, y, 18, 210, 96, 54)) {
-      changeScreen(screenBeforeExitConfirm);
-    } else if (inside(x, y, 126, 210, 96, 54)) {
-      waitingForTare = false;
-      waitingForCalibration = false;
-      changeScreen(SCREEN_MAIN);
     }
     return;
   }
@@ -1745,13 +1592,6 @@ void setup() {
 void loop() {
   handleTopButton();
   handleTouch();
-
-  if (screen == SCREEN_CAL_DONE &&
-      doneUntilMs != 0 &&
-      millis() >= doneUntilMs) {
-    doneUntilMs = 0;
-    changeScreen(SCREEN_MAIN);
-  }
 
   updateBatteryReading();
 
